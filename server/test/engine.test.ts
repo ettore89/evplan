@@ -284,6 +284,23 @@ describe('Test K — per-unit production without quantity efficiencies', () => {
   });
 });
 
+describe('Priority changes affect the production plan', () => {
+  it('a project moved to the top claims contended capacity earlier and displaces the others', () => {
+    const s = baseState('2026-11-02');
+    addProject(s, 1, 4, '2027-01-29', 1);
+    commitInitialPlan(s, 1);
+    addProject(s, 2, 4, '2027-01-29', 2);
+    commitInitialPlan(s, 2);
+    const before = forwardSchedule(s);
+    const after = forwardSchedule(applyOps(s, [{ type: 'move_priority', projectId: 2, toRank: 1 }]));
+    expect(ms(after, 2, 'EXW').forecast!).toBeLessThan(ms(before, 2, 'EXW').forecast!);
+    // the shared bottleneck now serves project 2 first
+    const firstVal = (r: ScheduleResult, pid: number) => Math.min(...s.activities.filter((a) => a.projectId === pid && a.seq === 9).map((a) => r.acts.get(a.id)!.start));
+    expect(firstVal(after, 2)).toBeLessThan(firstVal(before, 2));
+    assertCapacity(s, after);
+  });
+});
+
 describe('Calendars and weekend work', () => {
   it('skips weekends for production and uses an authorized Saturday when approved', () => {
     const s = baseState('2026-11-06'); // Friday

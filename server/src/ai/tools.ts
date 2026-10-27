@@ -197,7 +197,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'simulate_change',
-    description: 'Run the deterministic scheduling engine on proposed changes WITHOUT committing them, and return the impact on every project (milestone deltas, delayed/improved projects, displaced activities, freeze impact, violations). Operation types: set_capacity {workCenter, capacity}, move_priority {project, toRank}, pull_in {project}, weekend_work {workCenter, date}.',
+    description: 'Run the deterministic scheduling engine on proposed changes WITHOUT committing them, and return the impact on every project (milestone deltas, delayed/improved projects, displaced activities, freeze impact, violations). For capacity changes it also returns recoveryPotential: the impact if affected work were allowed to start earlier than currently approved. Operation types: set_capacity {workCenter, capacity}, move_priority {project, toRank}, pull_in {project}, weekend_work {workCenter, date}.',
     input_schema: {
       type: 'object',
       properties: {
@@ -219,7 +219,12 @@ export const TOOLS: ToolDef[] = [
       if (!(await can(pool, user, 'scenario.create'))) throw new HttpError(403, `Role ${user.role} cannot run simulations`);
       const ops = await toOps(i.ops);
       const r = await evaluate(pool, ops);
-      return summarizeSimulation(r);
+      const out: any = summarizeSimulation(r);
+      if (ops.some((o) => o.type === 'set_capacity' || o.type === 'weekend_work')) {
+        // Committed dates are never pulled earlier silently, so also report what the extra capacity could recover.
+        out.recoveryPotential = summarizeSimulation(await evaluate(pool, ops, undefined, { recovery: true }));
+      }
+      return out;
     },
   },
   {

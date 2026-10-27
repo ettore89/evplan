@@ -136,7 +136,8 @@ async function fallbackAnswer(question: string, user: AuthUser) {
       return {
         answer: [`**What-if: ${w.workCenter} capacity ${w.capacity} → ${target}** (simulation only, nothing committed): ${r.summary}.`,
           r.requiresManagementApproval ? `Committing would need Management approval (frozen: ${r.frozenProjectsImpacted.join(', ')}).` : '',
-          '', table(r.projects, ['code', 'EOL', 'ExWorks', 'Commissioned']),
+          '', '**Impact on the committed plan** (approved dates are not pulled earlier automatically):', table(r.projects, ['code', 'EOL', 'ExWorks', 'Commissioned']),
+          ...(r.recoveryPotential ? ['', `**Recovery potential** if affected work may start earlier than approved: ${r.recoveryPotential.summary}.`, table(r.recoveryPotential.projects, ['code', 'EOL', 'ExWorks', 'Commissioned'])] : []),
           '', 'Capacity changes are a Management / Program decision — open Scenario Planning to commit.'].join('\n'),
         trace,
       };

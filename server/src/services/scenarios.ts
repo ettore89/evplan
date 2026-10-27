@@ -69,8 +69,11 @@ export interface SimulationResult {
 }
 
 /** Deterministic what-if evaluation. Never writes plan data. */
-export async function evaluate(db: Db, ops: ScenarioOp[], state?: PlanState): Promise<SimulationResult> {
-  const base = state ?? (await loadPlanState(db));
+export async function evaluate(db: Db, ops: ScenarioOp[], state?: PlanState, opts: { recovery?: boolean } = {}): Promise<SimulationResult> {
+  let base = state ?? (await loadPlanState(db));
+  // Recovery mode: both sides of the comparison may start work as early as dependencies and
+  // capacity allow, isolating what the change could recover (what-if analysis only).
+  if (opts.recovery) base = { ...base, pullIn: base.projects.map((p) => p.id) };
   let sim: ReturnType<typeof simulate>;
   try {
     sim = simulate(base, ops);

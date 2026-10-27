@@ -28,6 +28,7 @@ async function user(username: string): Promise<AuthUser> {
 }
 
 export async function seed({ today = dayToIso(Math.floor(nowSlot() / 2)) } = {}) {
+  // NB: nowSlot() uses the facility time zone default (Europe/Rome).
   await migrate();
   const T = dayNumber(today);
   const ids = await tx(async (c) => { await truncateAll(c); return insertMasterData(c); });
@@ -62,9 +63,9 @@ export async function seed({ today = dayToIso(Math.floor(nowSlot() / 2)) } = {})
   }
 
   // Execute history up to yesterday evening exactly as planned.
+  // History is executed up to the current half-day; events below are recorded at real time.
   await setClock(null);
-  await setClock(`${iso(T)}T08:30:00+01:00`);
-  const now = T * 2;
+  const now = nowSlot();
   await tx(async (c) => {
     await lockPlan(c);
     await c.query(`UPDATE activities SET status = 'COMPLETED', actual_start = approved_start, actual_finish = approved_finish, pct_complete = 100,

@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { createApp } from './app.js';
-import { lockPlan, tx } from './db/pool.js';
+import { lockPlan, pool, tx } from './db/pool.js';
 import { migrate } from './db/migrate.js';
 import { recalculate } from './services/recalc.js';
 import { attachRealtime } from './services/realtime.js';
@@ -9,6 +9,12 @@ const PORT = Number(process.env.PORT ?? 4000);
 
 async function main() {
   await migrate();
+  const users = await pool.query('SELECT COUNT(*)::int AS n FROM users');
+  if (users.rows[0].n === 0 && process.env.SEED_DEMO !== '0') {
+    console.log('Empty database: loading master data and demonstration projects (set SEED_DEMO=0 to skip)…');
+    const { seed } = await import('./db/seed.js');
+    await seed();
+  }
   const app = createApp();
   const server = createServer(app);
   attachRealtime(server);

@@ -138,7 +138,9 @@ export interface BottleneckRow {
  * work center with the one that immediately follows it in the routing, and capacity queueing
  * observed in the actual schedule.
  */
-export function bottleneckAnalysis(state: PlanState, result: ScheduleResult, routeOrder: number[]): BottleneckRow[] {
+export function bottleneckAnalysis(
+  state: PlanState, result: ScheduleResult, routeOrder: number[], sizingTargets: Map<number, number | null> = new Map(),
+): BottleneckRow[] {
   const byWc = new Map<number, ActivityDef[]>();
   for (const a of state.activities) {
     if (!a.workCenterId || a.kind !== 'work' || a.status === 'CANCELLED') continue;
@@ -156,7 +158,11 @@ export function bottleneckAnalysis(state: PlanState, result: ScheduleResult, rou
   const minTp = Math.min(...stats.map((s) => s.throughput));
   const now = state.now;
   return stats.map((s, i) => {
-    const next = stats[i + 1];
+    // What this work center must feed: an explicit sizing target (e.g. subassembly test → FA),
+    // otherwise the slowest work center downstream of it (the flow it can actually deliver into).
+    const downstream = stats.slice(i + 1);
+    const targetId = sizingTargets.get(s.w.id) ?? null;
+    const target = targetId !== null ? stats.find((x) => x.w.id === targetId) : downstream.reduce<(typeof stats)[number] | undefined>((m, x) => (!m || x.throughput < m.throughput ? x : m), undefined);
     const list = byWc.get(s.w.id) ?? [];
     let wait = 0;
     let delayedActs = 0;
@@ -173,8 +179,8 @@ export function bottleneckAnalysis(state: PlanState, result: ScheduleResult, rou
       booked += result.ledger.cell(s.w.id, sl)?.load ?? 0;
       avail += result.ledger.capacityAt(s.w.id, sl);
     }
-    const required = next ? round2((next.throughput * s.avgDays)) : null;
-    const starves = !!next && s.throughput + 1e-6 < next.throughput;
+    const required = target ? round2(target.throughput * s.avgDays) : null;
+    const starves = !!target && s.throughput + 1e-6 < target.throughput;
     return {
       workCenterId: s.w.id,
       code: s.w.code,
@@ -182,15 +188,15 @@ export function bottleneckAnalysis(state: PlanState, result: ScheduleResult, rou
       capacity: s.w.capacity,
       avgDurationDays: round2(s.avgDays),
       throughputPerDay: round2(s.throughput),
-      downstreamCode: next?.w.code ?? null,
-      downstreamThroughput: next ? round2(next.throughput) : null,
+      downstreamCode: target?.w.code ?? null,
+      downstreamThroughput: target ? round2(target.throughput) : null,
       requiredCapacityToFeedDownstream: required,
       additionalCapacityNeeded: required !== null ? Math.max(0, round2(required - s.w.capacity)) : 0,
       isProgramBottleneck: Math.abs(s.throughput - minTp) < 1e-6,
       starvesDownstream: starves,
       capacityWaitDays: wait / 2,
       delayedActivities: delayedActs,
-      utilizationNext20d: avail ? round2(booked / (avail / 2) / 2) : 0,
+      utilizationNext20d: avail ? round2(booked / avail) : 0,
     };
   });
 }

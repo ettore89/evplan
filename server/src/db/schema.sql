@@ -63,8 +63,10 @@ CREATE TABLE IF NOT EXISTS work_centers (
   capacity_model text NOT NULL DEFAULT 'discrete' CHECK (capacity_model IN ('discrete','effective')),
   calendar_id int REFERENCES calendars(id),
   route_order int NOT NULL DEFAULT 0,
+  sizing_target_id int REFERENCES work_centers(id),
   notes text
 );
+ALTER TABLE work_centers ADD COLUMN IF NOT EXISTS sizing_target_id int REFERENCES work_centers(id);
 
 CREATE TABLE IF NOT EXISTS routes (
   id serial PRIMARY KEY,

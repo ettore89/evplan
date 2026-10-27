@@ -254,7 +254,7 @@ export async function capacityView(db: Db, days = 42) {
   const util = dailyUtilization(state, result, from, from + days);
   const wcs = await db.query('SELECT * FROM work_centers ORDER BY route_order, id');
   const order = wcs.rows.map((w) => w.id);
-  const bn = bottleneckAnalysis(state, result, order);
+  const bn = bottleneckAnalysis(state, result, order, new Map(wcs.rows.map((w) => [w.id, w.sizing_target_id])));
   const conflicts = conflictsByProject(state, result);
   const projects = await db.query(`SELECT id, code, name, priority FROM projects WHERE status = 'ACTIVE'`);
   const pcode = new Map(projects.rows.map((p) => [p.id, p.code]));

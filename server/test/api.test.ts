@@ -225,8 +225,12 @@ describe('API acceptance', () => {
     const d = await acts(g01);
     const exw = d.summary.milestones.find((m: any) => m.type === 'EXW');
     expect(exw.latestApproved).toBe(exw.forecast);
-    expect(exw.originalCommitted).toBeLessThan(exw.latestApproved); // historical miss preserved
-    expect(exw.varianceVsOriginalDays).toBeGreaterThan(0);
+    // the original commitment and every re-commitment stay on record
+    const hist = d.commitments.filter((c: any) => c.type === 'EXW');
+    expect(hist.length).toBeGreaterThanOrEqual(2);
+    expect(hist[0].kind).toBe('BASELINE');
+    expect(exw.originalCommitted).toBe(hist[0].committed_slot);
+    expect(hist[hist.length - 1].reason).toBe('Re-commit after SMT repair');
     const commits = (await pool.query('SELECT DISTINCT kind FROM milestone_commitments')).rows.map((r: any) => r.kind);
     expect(commits).toContain('BASELINE');
     expect(commits.some((k: string) => k === 'APPROVED_CHANGE' || k === 'OVERRIDE')).toBe(true);

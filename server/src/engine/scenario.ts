@@ -32,7 +32,11 @@ export function applyOps(base: PlanState, ops: ScenarioOp[]): PlanState {
     const rest = priorityOrder(s).filter((id) => !order.includes(id));
     [...order, ...rest].forEach((id, i) => {
       const p = s.projects.find((x) => x.id === id);
-      if (p) p.priority = i + 1;
+      if (!p) return;
+      // A project moved up in the ranking may claim scarce capacity earlier: its approved-start
+      // floors are released so the re-prioritization changes the plan, not just the row order.
+      if (i + 1 < p.priority && !s.pullIn.includes(p.id)) s.pullIn.push(p.id);
+      p.priority = i + 1;
     });
   };
   for (const op of ops) {

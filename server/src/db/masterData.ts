@@ -109,6 +109,8 @@ export async function insertMasterData(c: pg.PoolClient) {
     wc[code] = (await c.query(`INSERT INTO work_centers (code, name, function, capacity, max_concurrent, min_rate, capacity_model, calendar_id, route_order, notes)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, [code, name, fn, cap, mc, mr, model, cal.IT, i + 1, notes])).rows[0].id;
   }
+  // Subassembly testing/programming are sized to feed Final Assembly throughput.
+  await c.query('UPDATE work_centers SET sizing_target_id = $1 WHERE code IN ($2, $3)', [wc.FA, 'SUB_TEST', 'SUB_PROG']);
   const eu = (await c.query(`SELECT id FROM regions WHERE code='EU'`)).rows[0].id;
   const na = (await c.query(`SELECT id FROM regions WHERE code='NA'`)).rows[0].id;
   const routes: Record<string, number> = {};

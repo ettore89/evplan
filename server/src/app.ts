@@ -170,7 +170,7 @@ export function createApp() {
   api.post('/simulate', async (req, res) => {
     const ops = z.array(opSchema).min(1).parse(req.body.ops) as ScenarioOp[];
     await requirePermission(pool, req.user, 'scenario.create');
-    res.json(await evaluate(pool, ops));
+    res.json(await evaluate(pool, ops, undefined, { recovery: req.body.recovery === true }));
   });
   api.get('/scenarios', async (_req, res) => {
     const r = await pool.query(`SELECT s.id, s.name, s.description, s.status, s.ops, s.created_at, s.requires_management, s.requires_reason, s.frozen_projects,

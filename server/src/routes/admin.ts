@@ -22,7 +22,7 @@ export const ENTITIES: Record<string, EntityDef> = {
     table: 'routing_steps', order: 'product_type_id, seq',
     columns: ['product_type_id', 'seq', 'code', 'name', 'function', 'work_center_id', 'duration_slots', 'scope', 'kind', 'predecessor_seqs', 'milestone_tag', 'use_destination_calendar'],
   },
-  work_centers: { table: 'work_centers', affectsPlan: true, order: 'route_order, id', columns: ['code', 'name', 'function', 'capacity', 'max_concurrent', 'min_rate', 'capacity_model', 'calendar_id', 'route_order', 'notes'] },
+  work_centers: { table: 'work_centers', affectsPlan: true, order: 'route_order, id', columns: ['code', 'name', 'function', 'capacity', 'max_concurrent', 'min_rate', 'capacity_model', 'calendar_id', 'route_order', 'sizing_target_id', 'notes'] },
   calendars: { table: 'calendars', affectsPlan: true, columns: ['code', 'name', 'country', 'working_weekdays'] },
   calendar_holidays: { table: 'calendar_holidays', affectsPlan: true, order: 'calendar_id, date', columns: ['calendar_id', 'date', 'name'] },
   weekend_authorizations: { table: 'weekend_authorizations', affectsPlan: true, order: 'date DESC', columns: ['work_center_id', 'activity_id', 'date', 'capacity', 'reason', 'active'] },
