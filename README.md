@@ -11,6 +11,8 @@ A multi-user production planning & execution application for an EV-charging manu
 
 ## Quick start
 
+> **Not technical?** Follow the step-by-step guide in [HOW-TO-RUN.md](HOW-TO-RUN.md).
+
 ### Option A: Docker Compose
 
 ```bash
