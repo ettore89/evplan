@@ -17,12 +17,16 @@ export const ENTITIES: Record<string, EntityDef> = {
   users: { table: 'users', columns: ['username', 'name', 'role', 'active'], order: 'id' },
   regions: { table: 'regions', columns: ['code', 'name'] },
   customers: { table: 'customers', columns: ['name', 'country', 'region_id'], order: 'name' },
-  product_types: { table: 'product_types', columns: ['code', 'name', 'family'] },
+  product_types: { table: 'product_types', columns: ['code', 'name', 'family', 'item_codes', 'default_hw_revision'] },
+  routing_versions: { table: 'routing_versions', affectsPlan: true, order: 'template_kind, product_type_id, version', columns: ['product_type_id', 'template_kind', 'code', 'version', 'effective_from', 'status', 'notes'] },
   routing_steps: {
-    table: 'routing_steps', order: 'product_type_id, seq',
-    columns: ['product_type_id', 'seq', 'code', 'name', 'function', 'work_center_id', 'duration_slots', 'scope', 'kind', 'predecessor_seqs', 'milestone_tag', 'use_destination_calendar'],
+    table: 'routing_steps', affectsPlan: true, order: 'routing_version_id, seq',
+    columns: ['routing_version_id', 'seq', 'code', 'name', 'function', 'work_center_id', 'duration_slots', 'scope', 'stage', 'kind', 'predecessor_seqs', 'milestone_tag',
+      'use_destination_calendar', 'phases', 'hold_from', 'test_plan_code', 'gate_templates'],
   },
-  work_centers: { table: 'work_centers', affectsPlan: true, order: 'route_order, id', columns: ['code', 'name', 'function', 'capacity', 'max_concurrent', 'min_rate', 'capacity_model', 'calendar_id', 'route_order', 'sizing_target_id', 'notes'] },
+  work_centers: { table: 'work_centers', affectsPlan: true, order: 'route_order, id', columns: ['code', 'name', 'function', 'resource_type', 'capacity', 'calendar_id', 'region', 'route_order', 'sizing_target_id', 'provisional', 'notes'] },
+  resource_capacity_changes: { table: 'resource_capacity_changes', affectsPlan: true, order: 'work_center_id, effective_from', columns: ['work_center_id', 'effective_from', 'capacity', 'status', 'reason'] },
+  resource_reservations: { table: 'resource_reservations', affectsPlan: true, order: 'start_slot', columns: ['work_center_id', 'start_slot', 'finish_slot', 'units', 'kind', 'reason', 'project_id', 'status'] },
   calendars: { table: 'calendars', affectsPlan: true, columns: ['code', 'name', 'country', 'working_weekdays'] },
   calendar_holidays: { table: 'calendar_holidays', affectsPlan: true, order: 'calendar_id, date', columns: ['calendar_id', 'date', 'name'] },
   weekend_authorizations: { table: 'weekend_authorizations', affectsPlan: true, order: 'date DESC', columns: ['work_center_id', 'activity_id', 'date', 'capacity', 'reason', 'active'] },
@@ -30,6 +34,14 @@ export const ENTITIES: Record<string, EntityDef> = {
     table: 'routes', affectsPlan: true, order: 'code',
     columns: ['code', 'name', 'origin_country', 'destination_country', 'region_id', 'lead_time_days', 'min_days', 'max_days', 'operates_saturday', 'operates_sunday', 'holiday_calendar_ids', 'release_lag_slots', 'restrictions'],
   },
+  service_profiles: {
+    table: 'service_profiles', affectsPlan: true, order: 'route_id, code',
+    columns: ['route_id', 'code', 'name', 'mode', 'service_level', 'internal_prep_slots', 'transit_days', 'customs_days', 'final_delivery_days', 'booking_lead_days', 'confirmation_status', 'notes'],
+  },
+  test_plans: { table: 'test_plans', affectsPlan: true, order: 'code, version', columns: ['code', 'name', 'version', 'scope', 'duration_slots', 'status', 'rationale'] },
+  sw_components: { table: 'sw_components', columns: ['code', 'name', 'kind', 'product_family'] },
+  materials: { table: 'materials', order: 'part_number', columns: ['part_number', 'description', 'critical', 'uom'] },
+  bom_items: { table: 'bom_items', affectsPlan: true, order: 'product_type_id, material_id', columns: ['product_type_id', 'material_id', 'qty_per_unit', 'needed_at_code'] },
   delay_categories: { table: 'delay_categories', columns: ['code', 'name'] },
   permissions: { table: 'permissions', pk: 'action', order: 'action', columns: ['action', 'roles', 'description'] },
   settings: { table: 'settings', pk: 'key', order: 'key', affectsPlan: true, columns: ['key', 'value', 'description'] },
@@ -43,7 +55,7 @@ function def(name: string) {
 
 function values(d: EntityDef, body: Record<string, unknown>) {
   const cols = d.columns.filter((c) => c in body);
-  return { cols, vals: cols.map((c) => (c === 'value' ? JSON.stringify(body[c]) : body[c] === '' ? null : body[c])) };
+  return { cols, vals: cols.map((c) => (['value', 'phases', 'hold_from', 'gate_templates'].includes(c) && body[c] !== null && typeof body[c] !== 'string' ? JSON.stringify(body[c]) : body[c] === '' ? null : body[c])) };
 }
 
 export function adminRouter() {

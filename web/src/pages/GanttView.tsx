@@ -7,11 +7,12 @@ import { dayOf, finishLabel, fmtDay, isoToDay, monthLabel, slotLabel, weekNo } f
 
 type Row =
   | { kind: 'project'; key: string; p: any; h: number }
-  | { kind: 'unit'; key: string; p: any; u: any; acts: any[]; h: number }
-  | { kind: 'ship'; key: string; p: any; acts: any[]; h: number }
-  | { kind: 'act'; key: string; p: any; a: any; unitLabel: string; h: number };
+  | { kind: 'unit'; key: string; p: any; u: any; acts: any[]; h: number; indent: number }
+  | { kind: 'group'; key: string; p: any; label: string; icon: string; sub?: string; acts: any[]; h: number; indent: number; expandable: boolean; milestones?: any[] }
+  | { kind: 'act'; key: string; p: any; a: any; unitLabel: string; h: number; indent: number };
 
-const H = { project: 36, unit: 26, ship: 26, act: 22 };
+const H = { project: 36, unit: 26, group: 26, act: 22 };
+const FAMILY_LABEL: Record<string, string> = { POWER_CABINET: 'Power cabinets', DISPENSER: 'Dispensers', CHARGE_DOCK: 'Charge docks' };
 const MS_ICON: Record<string, string> = { EOL: 'E', EXW: 'X', COMM: 'C' };
 
 export function GanttView() {
@@ -23,6 +24,8 @@ export function GanttView() {
   const [criticalOnly, setCriticalOnly] = useState(false);
   const [delaysOnly, setDelaysOnly] = useState(false);
   const [showBaseline, setShowBaseline] = useState(true);
+  const [familyFilter, setFamilyFilter] = useState<Set<string>>(new Set());
+  const [demandFilter, setDemandFilter] = useState<string>('ALL');
   const [panel, setPanel] = useState<{ id: number; unit: string } | null>(null);
   const [chain, setChain] = useState<{ projectId: number; type: string } | null>(null);
   const [drag, setDrag] = useState<{ a: any; startX: number; dx: number } | null>(null);
@@ -55,17 +58,45 @@ export function GanttView() {
   const toggle = (k: string) => setExpanded((e) => { const n = new Set(e); n.has(k) ? n.delete(k) : n.add(k); return n; });
   const visibleAct = (a: any) => (!fnFilter.size || fnFilter.has(a.function)) && (!criticalOnly || a.isCritical) && (!delaysOnly || a.delayed || a.status === 'BLOCKED');
 
+  const unitVisible = (u: any) => u.status === 'ACTIVE' && (!familyFilter.size || familyFilter.has(u.family));
   const rows: Row[] = [];
+  const pushActs = (p: any, list: any[], label: string, indent: number) => { for (const a of list) if (visibleAct(a)) rows.push({ kind: 'act', key: `a${a.id}`, p, a, unitLabel: label, h: H.act, indent }); };
+  const pushUnit = (p: any, u: any, acts: any[], indent: number) => {
+    const ua = acts.filter((a: any) => a.unitId === u.id && a.scope === 'UNIT');
+    rows.push({ kind: 'unit', key: `u${u.id}`, p, u, acts: ua, h: H.unit, indent });
+    if (expanded.has(`u${u.id}`)) pushActs(p, ua, u.serial, indent + 1);
+  };
   for (const p of data.projects) {
+    if (demandFilter !== 'ALL' && p.demandStatus !== demandFilter) continue;
+    const units = data.units.filter((u: any) => u.projectId === p.id && unitVisible(u));
+    if (familyFilter.size && !units.length) continue;
     rows.push({ kind: 'project', key: `p${p.id}`, p, h: H.project });
     if (!expanded.has(`p${p.id}`)) continue;
     const acts = model.byProject.get(p.id) ?? [];
-    for (const u of data.units.filter((u: any) => u.projectId === p.id)) {
-      const ua = acts.filter((a: any) => a.unitId === u.id);
-      rows.push({ kind: 'unit', key: `u${u.id}`, p, u, acts: ua, h: H.unit });
-      if (expanded.has(`u${u.id}`)) for (const a of acts.filter((a: any) => a.unitId === u.id)) if (visibleAct(a)) rows.push({ kind: 'act', key: `a${a.id}`, p, a, unitLabel: u.serial, h: H.act });
+    for (const sy of data.systems.filter((s: any) => s.projectId === p.id)) {
+      const su = units.filter((u: any) => u.systemId === sy.id);
+      if (familyFilter.size && !su.length) continue;
+      const sa = acts.filter((a: any) => a.systemId === sy.id && a.scope === 'SYSTEM');
+      const key = `y${sy.id}`;
+      rows.push({ kind: 'group', key, p, label: sy.code, icon: '▣', sub: sy.composition, acts: sa, h: H.group, indent: 1, expandable: true });
+      if (expanded.has(key)) { pushActs(p, sa, sy.code, 2); for (const u of su) pushUnit(p, u, acts, 2); }
     }
-    rows.push({ kind: 'ship', key: `s${p.id}`, p, acts: acts.filter((a: any) => a.kind === 'transport'), h: H.ship });
+    for (const u of units.filter((u: any) => !u.systemId)) pushUnit(p, u, acts, 1);
+    for (const sh of data.shipments.filter((s: any) => s.projectId === p.id)) {
+      const sa = acts.filter((a: any) => a.shipmentId === sh.id && a.scope === 'SHIPMENT');
+      const key = `s${sh.id}`;
+      const ms = (p.milestoneParts ?? []).filter((m: any) => m.shipmentId === sh.id);
+      rows.push({ kind: 'group', key, p, label: sh.code, icon: '🚚', sub: `${sh.service ?? sh.route}${sh.transportBooked ? ' · booked' : ''}`, acts: sa, h: H.group, indent: 1, expandable: true, milestones: ms });
+      if (expanded.has(key)) pushActs(p, sa, sh.code, 2);
+    }
+    for (const v of data.visits.filter((x: any) => x.projectId === p.id)) {
+      const va = acts.filter((a: any) => a.visitId === v.id && a.scope === 'SITE');
+      if (!va.length) continue;
+      const key = `v${v.id}`;
+      const ms = (p.milestoneParts ?? []).filter((m: any) => m.visitId === v.id);
+      rows.push({ kind: 'group', key, p, label: v.code, icon: '⚑', sub: v.site, acts: va, h: H.group, indent: 1, expandable: true, milestones: ms });
+      if (expanded.has(key)) pushActs(p, va, v.code, 2);
+    }
   }
   const top = new Map<string, number>();
   let y = 0;
@@ -88,8 +119,9 @@ export function GanttView() {
     if (!visibleAct(a)) return <div key={a.id} className="bar ghost" style={barStyle(a.forecastStart, a.forecastFinish)} />;
     const isDrag = drag?.a.id === a.id;
     const dx = isDrag ? drag!.dx : 0;
+    const openGates = (a.gates ?? []).filter((g: any) => g.status !== 'READY' && !g.awaiting_plan && !g.awaitingPlan);
     const cls = [
-      'bar', `st-${a.status}`, a.isCritical ? 'critical' : '', a.delayed ? 'delayed' : '', a.rescheduled ? 'rescheduled' : '',
+      'bar', `st-${a.status}`, `conf-${a.confidence ?? 'FIRM'}`, a.isCritical ? 'critical' : '', a.delayed ? 'delayed' : '', a.rescheduled ? 'rescheduled' : '',
       model.overloaded.has(a.id) ? 'overload' : '', a.locked ? 'locked' : '', compact ? 'compact' : '', isDrag ? 'dragging' : '',
     ].join(' ');
     const title = [
@@ -102,6 +134,9 @@ export function GanttView() {
       a.rescheduled ? 'Approved rescheduling (differs from baseline)' : '',
       a.blocker ? `Blocker: ${a.blocker}` : '', a.weekendWork ? 'Weekend work authorized' : '',
       model.overloaded.has(a.id) ? 'CAPACITY CONFLICT' : '', a.isCritical ? 'On driving path' : '',
+      a.confidence && a.confidence !== 'FIRM' ? `Confidence: ${a.confidence.toLowerCase()}${a.confidence === 'OPEN' ? ' (depends on an undated readiness input)' : ' (depends on a forecast readiness date)'}` : '',
+      ...openGates.map((g: any) => `◇ ${g.title}: ${g.status}${g.owner ? ` (owner ${g.owner})` : ''}`),
+      (a.phases?.length ?? 0) > 1 ? `Phases: ${a.phases.map((ph: any) => `${ph.name} ${ph.slots / 2}d`).join(' → ')}` : '',
     ].filter(Boolean).join('\n');
     const movable = canMove && !compact && ['NOT_STARTED', 'READY', 'BLOCKED'].includes(a.status) && a.kind === 'work';
     const actualW = a.actualStart !== null ? ((a.actualFinish ?? Math.min(data.now + 1, a.forecastFinish)) - a.actualStart) * W : 0;
@@ -117,6 +152,7 @@ export function GanttView() {
           {actualW > 0 && <div className="actual" style={{ width: Math.max(2, actualW - 1), marginLeft: (a.actualStart - a.forecastStart) * W }} />}
           {!compact && zoom >= 10 && <span className="bar-label">{a.code}{a.status === 'BLOCKED' ? ' ⛔' : ''}{a.weekendWork ? ' ★' : ''}{a.locked ? ' 🔒' : ''}</span>}
         </div>
+        {openGates.length > 0 && <div className={`gate-mark ${openGates.some((g: any) => g.status === 'BLOCKED') ? 'blocked' : openGates.some((g: any) => g.status === 'UNKNOWN') ? 'unknown' : ''}`} style={{ left: x(a.forecastStart) - 5 }} title={openGates.map((g: any) => `${g.title}: ${g.status}`).join('\n')} />}
         {a.delayed && <div className="delay-ext" title={title} style={{ left: delayLeft, width: Math.max(2, x(a.forecastFinish) - delayLeft - 1) }} />}
       </div>
     );
@@ -162,7 +198,7 @@ export function GanttView() {
     const a = drag.a;
     setTimeout(() => setDrag(null), 0);
     if (delta !== 0) {
-      const unit = data.units.find((u: any) => u.id === a.unitId)?.serial ?? 'Shipment';
+      const unit = data.units.find((u: any) => u.id === a.unitId)?.serial ?? data.systems.find((s: any) => s.id === a.systemId)?.code ?? 'Shipment';
       setMove({ a, start: a.forecastStart + delta, unit });
     }
   };
@@ -174,7 +210,7 @@ export function GanttView() {
       <div className="toolbar">
         <h2>Gantt</h2>
         <button className="secondary small" onClick={() => setExpanded(new Set(data.projects.map((p: any) => `p${p.id}`)))}>Expand projects</button>
-        <button className="secondary small" onClick={() => setExpanded(new Set([...data.projects.map((p: any) => `p${p.id}`), ...data.units.map((u: any) => `u${u.id}`)]))}>Expand all</button>
+        <button className="secondary small" onClick={() => setExpanded(new Set([...data.projects.map((p: any) => `p${p.id}`), ...data.systems.map((s: any) => `y${s.id}`)]))}>Expand systems</button>
         <button className="secondary small" onClick={() => setExpanded(new Set())}>Collapse</button>
         <span className="sep" />
         {Object.keys(FN_COLORS).map((f) => (
@@ -182,6 +218,13 @@ export function GanttView() {
             <span className="dot" style={{ background: FN_COLORS[f] }} />{FN_LABEL[f]}
           </button>
         ))}
+        <span className="sep" />
+        {Object.keys(FAMILY_LABEL).map((f) => (
+          <button key={f} className={`chip ${familyFilter.has(f) ? 'on' : ''}`} onClick={() => setFamilyFilter((s0) => { const n = new Set(s0); n.has(f) ? n.delete(f) : n.add(f); return n; })}>{FAMILY_LABEL[f]}</button>
+        ))}
+        <select value={demandFilter} onChange={(e) => setDemandFilter(e.target.value)} title="Demand status">
+          <option value="ALL">All demand</option><option value="COMMITTED">Committed</option><option value="APPROVED">Approved</option><option value="TENTATIVE">Tentative</option>
+        </select>
         <label className="check"><input type="checkbox" checked={criticalOnly} onChange={(e) => setCriticalOnly(e.target.checked)} /> Driving path</label>
         <label className="check"><input type="checkbox" checked={delaysOnly} onChange={(e) => setDelaysOnly(e.target.checked)} /> Delays/blocked</label>
         <label className="check"><input type="checkbox" checked={showBaseline} onChange={(e) => setShowBaseline(e.target.checked)} /> Baseline</label>
@@ -194,13 +237,14 @@ export function GanttView() {
       <div className="legend small">
         <span><i className="lg forecast" /> forecast</span><span><i className="lg actual" /> actual</span><span><i className="lg approved" /> approved (when different)</span>
         <span><i className="lg baseline" /> baseline</span><span><i className="lg delay" /> delay vs approved</span><span><i className="lg resched" /> approved rescheduling</span>
-        <span><i className="lg crit" /> driving path</span><span><i className="lg over" /> capacity conflict</span><span>◆ E/X/C milestones (click = cause chain)</span>
+        <span><i className="lg crit" /> driving path</span><span><i className="lg over" /> capacity conflict</span><span><i className="lg cond" /> conditional</span><span><i className="lg open" /> open (undated input)</span>
+        <span><i className="lg gate" /> open readiness gate</span><span>◆ E/X/C milestones (click = cause chain)</span>
         <span>★ weekend work</span>{canMove && <span>Drag bars to reschedule (simulated before commit)</span>}
       </div>
       <div className="gantt" ref={scroller} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onMouseLeave={onMouseUp}>
         <div className="g-inner" style={{ width: width + 300 }}>
           <div className="g-head">
-            <div className="g-label head-label">Project / unit / activity</div>
+            <div className="g-label head-label">Project / system / unit / shipment / site</div>
             <div className="g-time" style={{ width }}>
               <div className="g-months">{months.map((m) => <div key={m.d} style={{ left: x(m.d * 2), width: m.n * 2 * W }}>{monthLabel(m.d)}</div>)}</div>
               <div className="g-days">{days.map((d) => (
@@ -225,16 +269,20 @@ export function GanttView() {
             </svg>
             {rows.map((r) => (
               <div key={r.key} className={`g-row ${r.kind}`} style={{ height: r.h }}>
-                <div className="g-label" onClick={() => (r.kind === 'project' ? toggle(r.key) : r.kind === 'unit' ? toggle(r.key) : r.kind === 'act' ? setPanel({ id: r.a.id, unit: r.unitLabel }) : null)}>
+                <div className="g-label" onClick={() => (r.kind === 'project' || r.kind === 'unit' || (r.kind === 'group' && r.expandable) ? toggle(r.key) : r.kind === 'act' ? setPanel({ id: r.a.id, unit: r.unitLabel }) : null)}>
                   {r.kind === 'project' && <>
                     <span className="caret">{expanded.has(r.key) ? '▾' : '▸'}</span><b className="prio">{r.p.priority}</b><b>{r.p.code}</b>
                     <span className="lbl-name">{r.p.name}</span>
+                    {r.p.demandStatus !== 'COMMITTED' && <span className={`demand d-${r.p.demandStatus}`} title="Uncommitted demand: indicative plan only">{r.p.demandStatus === 'TENTATIVE' ? 'T' : 'A'}</span>}
                     <RiskBadge risk={r.p.risk} />{r.p.freeze.frozen && <span className="frozen" title={`Frozen since ${r.p.freeze.freezeStartDate}`}>❄</span>}
                   </>}
-                  {r.kind === 'unit' && <><span className="caret ind1">{expanded.has(r.key) ? '▾' : '▸'}</span><span>{r.u.serial}</span><span className="muted small">{r.u.productName}</span>
-                    {r.acts.some((a: any) => a.status === 'BLOCKED') && <span className="tag-red small">blocked</span>}</>}
-                  {r.kind === 'ship' && <span className="ind1 muted">🚚 Consolidated shipment</span>}
-                  {r.kind === 'act' && <span className={`ind2 ${!visibleAct(r.a) ? 'dim' : ''}`}><i className="dot" style={{ background: FN_COLORS[r.a.function] }} />{r.a.name}{r.a.status === 'BLOCKED' ? ' ⛔' : ''}</span>}
+                  {r.kind === 'group' && <span style={{ paddingLeft: r.indent * 14 }}><span className="caret">{expanded.has(r.key) ? '▾' : '▸'}</span>{r.icon} <b>{r.label}</b> <span className="muted small">{r.sub}</span>
+                    {r.acts.some((a: any) => a.status === 'BLOCKED') && <span className="tag-red small"> blocked</span>}</span>}
+                  {r.kind === 'unit' && <span style={{ paddingLeft: r.indent * 14 }}><span className="caret">{expanded.has(r.key) ? '▾' : '▸'}</span><span>{r.u.name ?? r.u.serial}</span>
+                    <span className="muted small"> {r.u.productCode}{r.u.serial && r.u.serial !== r.u.name ? ` · ${r.u.serial}` : ''}</span>
+                    {r.u.disposition !== 'RELEASABLE' && <span className="tag-red small" title="Quality disposition"> {r.u.disposition.toLowerCase().replace('_', ' ')}</span>}
+                    {r.acts.some((a: any) => a.status === 'BLOCKED') && <span className="tag-red small"> blocked</span>}</span>}
+                  {r.kind === 'act' && <span style={{ paddingLeft: r.indent * 14 }} className={!visibleAct(r.a) ? 'dim' : ''}><i className="dot" style={{ background: FN_COLORS[r.a.function] }} />{r.a.name}{r.a.status === 'BLOCKED' ? ' ⛔' : ''}</span>}
                 </div>
                 <div className="g-track" style={{ width }}>
                   {r.kind === 'project' && (() => {
@@ -251,7 +299,11 @@ export function GanttView() {
                     </>;
                   })()}
                   {r.kind === 'unit' && r.acts.map((a: any) => actBar(a, true, r.u.serial))}
-                  {r.kind === 'ship' && r.acts.map((a: any) => actBar(a, true, data.units.find((u: any) => u.id === a.unitId)?.serial ?? 'Shipment'))}
+                  {r.kind === 'group' && r.acts.map((a: any) => actBar(a, true, r.label))}
+                  {r.kind === 'group' && (r.milestones ?? []).map((m: any) => {
+                    const f = m.actual ?? m.forecast;
+                    return f === null ? null : <div key={m.id} className={`ms-diamond small risk-${m.risk}`} style={{ left: x(f) - 5 }} title={`${m.label} — ${m.scopeCode}\nForecast ${m.forecastLabel}${m.actualLabel ? `\nActual ${m.actualLabel}` : ''}\n${m.progressLabel}\nConfidence ${m.confidence}`}><span>{MS_ICON[m.type]}</span></div>;
+                  })}
                   {r.kind === 'act' && actBar(r.a, false, r.unitLabel)}
                 </div>
               </div>

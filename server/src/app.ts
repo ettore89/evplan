@@ -8,16 +8,19 @@ import { pool, tx, lockPlan } from './db/pool.js';
 import { authenticate, login } from './services/auth.js';
 import { adminRouter } from './routes/admin.js';
 import { aiRouter } from './routes/ai.js';
-import { audit, can, currentSlot, HttpError, requirePermission } from './services/common.js';
+import { audit, can, capabilitiesOf, currentSlot, HttpError, requirePermission } from './services/common.js';
+import { v4Router } from './routes/v4.js';
+import { importRouter } from './routes/imports.js';
 import { executionSchema, updateExecution } from './services/execution.js';
 import { createProject, createProjectSchema, freezeInfo } from './services/projects.js';
 import {
   activitiesFor, capacityView, dailyControl, diffSinceSnapshot, gantt, milestoneChain, portfolio, projectDetails, snapshotData,
 } from './services/read.js';
 import { recalculate } from './services/recalc.js';
+import { syncDerivedGates } from './services/gates.js';
 import { presence } from './services/realtime.js';
 import {
-  commitScenario, createScenario, evaluate, opSchema, rejectScenario, resimulate, scenarioSchema, submitScenario, updateScenarioOps,
+  commitScenario, createScenario, evaluate, opSchema, rejectScenario, resimulate, scenarioSchema, staleProjects, submitScenario, updateScenarioOps,
 } from './services/scenarios.js';
 import type { ScenarioOp } from './engine/scenario.js';
 
@@ -30,7 +33,8 @@ const id = (req: Request, key = 'id') => {
 export function createApp() {
   const app = express();
   app.use(cors());
-  app.use(express.json({ limit: '2mb' }));
+  app.use('/api/imports/om-tracker', express.raw({ type: () => true, limit: '40mb' }));
+  app.use(express.json({ limit: '5mb' }));
 
   app.get('/api/health', async (_req, res) => {
     await pool.query('SELECT 1');
@@ -52,18 +56,19 @@ export function createApp() {
   api.use(authenticate);
 
   api.get('/me', async (req, res) => {
-    const perms = await pool.query('SELECT action FROM permissions WHERE $1 = ANY(roles)', [req.user.role]);
-    res.json({ user: req.user, permissions: perms.rows.map((r) => r.action) });
+    res.json({ user: req.user, permissions: await capabilitiesOf(pool, req.user) });
   });
 
   api.get('/meta', async (_req, res) => {
     const q = (s: string) => pool.query(s).then((r) => r.rows);
-    const [customers, routes, productTypes, workCenters, calendars, delayCategories, users, settings, regions] = await Promise.all([
+    const [customers, routes, productTypes, workCenters, calendars, delayCategories, users, settings, regions, serviceProfiles, testPlans, materials, swComponents, swReleases] = await Promise.all([
       q('SELECT * FROM customers ORDER BY name'), q('SELECT * FROM routes ORDER BY code'), q('SELECT * FROM product_types ORDER BY code'),
       q('SELECT * FROM work_centers ORDER BY route_order, id'), q('SELECT * FROM calendars ORDER BY id'), q('SELECT * FROM delay_categories ORDER BY id'),
       q('SELECT id, username, name, role FROM users WHERE active ORDER BY name'), q(`SELECT key, value FROM settings`), q('SELECT * FROM regions ORDER BY code'),
+      q('SELECT * FROM service_profiles ORDER BY code'), q('SELECT * FROM test_plans ORDER BY code, version'), q('SELECT * FROM materials ORDER BY part_number'),
+      q('SELECT * FROM sw_components ORDER BY code'), q('SELECT r.id, r.component_id, r.version, r.stage FROM sw_releases r ORDER BY r.created_at'),
     ]);
-    res.json({ customers, routes, productTypes, workCenters, calendars, delayCategories, users, regions,
+    res.json({ customers, routes, productTypes, workCenters, calendars, delayCategories, users, regions, serviceProfiles, testPlans, materials, swComponents, swReleases,
       settings: Object.fromEntries(settings.map((s) => [s.key, s.value])), now: await currentSlot(pool) });
   });
 
@@ -111,7 +116,7 @@ export function createApp() {
         approve: { activityIds: new Set(acts.rows.map((a) => a.id)), projectIds: new Set([pid]), kind: fz?.frozen ? 'OVERRIDE' : 'APPROVED_CHANGE', reason: body.reason },
       });
       // milestones re-committed even if the forecast did not change in this run
-      const ms = await c.query('SELECT id, forecast_slot, approved_slot FROM milestones WHERE project_id = $1 AND shipment_id IS NULL', [pid]);
+      const ms = await c.query('SELECT id, forecast_slot, approved_slot FROM milestones WHERE project_id = $1', [pid]);
       for (const m of ms.rows) {
         if (m.forecast_slot !== m.approved_slot && m.forecast_slot !== null) {
           await c.query('UPDATE milestones SET approved_slot = forecast_slot WHERE id = $1', [m.id]);
@@ -170,29 +175,31 @@ export function createApp() {
   api.post('/simulate', async (req, res) => {
     const ops = z.array(opSchema).min(1).parse(req.body.ops) as ScenarioOp[];
     await requirePermission(pool, req.user, 'scenario.create');
-    res.json(await evaluate(pool, ops, undefined, { recovery: req.body.recovery === true }));
+    res.json(await evaluate(pool, req.user, ops, { recovery: req.body.recovery === true }));
   });
   api.get('/scenarios', async (_req, res) => {
     const r = await pool.query(`SELECT s.id, s.name, s.description, s.status, s.ops, s.created_at, s.requires_management, s.requires_reason, s.frozen_projects,
-      s.result->>'summary' AS summary, s.justification, s.source, u.name AS created_by_name, a.name AS approved_by_name, s.approved_at
+      s.result->>'summary' AS summary, s.justification, s.source, u.name AS created_by_name, a.name AS approved_by_name, s.approved_at, s.input_versions
       FROM scenarios s JOIN users u ON u.id = s.created_by LEFT JOIN users a ON a.id = s.approved_by ORDER BY s.created_at DESC LIMIT 200`);
-    res.json(r.rows);
+    const out = [];
+    for (const row of r.rows) out.push({ ...row, stale: ['DRAFT', 'PENDING_APPROVAL'].includes(row.status) ? await staleProjects(pool, row.input_versions) : [] });
+    res.json(out);
   });
   api.get('/scenarios/:id', async (req, res) => {
     const r = await pool.query(`SELECT s.*, u.name AS created_by_name, a.name AS approved_by_name FROM scenarios s JOIN users u ON u.id = s.created_by
       LEFT JOIN users a ON a.id = s.approved_by WHERE s.id = $1`, [id(req)]);
     if (!r.rows.length) throw new HttpError(404, 'Scenario not found');
-    res.json(r.rows[0]);
+    res.json({ ...r.rows[0], stale: ['DRAFT', 'PENDING_APPROVAL'].includes(r.rows[0].status) ? await staleProjects(pool, r.rows[0].input_versions) : [] });
   });
   api.post('/scenarios', async (req, res) => {
     const input = scenarioSchema.parse(req.body);
-    res.status(201).json(await tx((c) => createScenario(c, req.user, input)));
+    res.status(201).json(await tx(async (c) => { await lockPlan(c); return createScenario(c, req.user, input as any); }));
   });
   api.put('/scenarios/:id', async (req, res) => {
     const body = z.object({ name: z.string().optional(), description: z.string().optional(), ops: z.array(opSchema).min(1) }).parse(req.body);
-    res.json(await tx((c) => updateScenarioOps(c, req.user, id(req), body as any)));
+    res.json(await tx(async (c) => { await lockPlan(c); return updateScenarioOps(c, req.user, id(req), body as any); }));
   });
-  api.post('/scenarios/:id/simulate', async (req, res) => res.json(await tx((c) => resimulate(c, id(req)))));
+  api.post('/scenarios/:id/simulate', async (req, res) => res.json(await tx((c) => resimulate(c, req.user, id(req)))));
   api.post('/scenarios/:id/submit', async (req, res) => {
     await tx((c) => submitScenario(c, req.user, id(req), req.body?.note));
     res.json({ ok: true });
@@ -211,6 +218,7 @@ export function createApp() {
     const out = await tx(async (c) => {
       await lockPlan(c);
       await requirePermission(c, req.user, 'plan.recalculate');
+      await syncDerivedGates(c);
       const r = await recalculate(c, { userId: req.user.id, kind: 'MANUAL_RECALC', summary: `Recalculation triggered by ${req.user.name}` });
       return { version: r.version, changedActivities: r.changes.length, milestoneChanges: r.milestoneChanges.length };
     });
@@ -266,6 +274,8 @@ export function createApp() {
     res.json(r.rows);
   });
 
+  api.use('/', v4Router());
+  api.use('/imports', importRouter());
   api.use('/admin', adminRouter());
   api.use('/ai', aiRouter());
   app.use('/api', api);

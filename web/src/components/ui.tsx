@@ -37,6 +37,7 @@ export function MilestoneCell({ m, onClick }: { m: any; onClick?: () => void }) 
     `Forecast: ${m.forecastLabel || '—'}`,
     `Actual: ${m.actualLabel || '—'}`,
     `Variance vs approved: ${m.varianceDays} wd · vs original: ${m.varianceVsOriginalDays} wd`,
+    m.confidence ? `Confidence: ${m.confidence.toLowerCase()}` : '', m.progressLabel ?? '',
     m.delay ? `Cause: ${m.delay.reason} (${m.delay.project ?? ''} ${m.delay.unit ?? ''} ${m.delay.activity ?? ''})` : '',
   ].filter(Boolean).join('\n');
   return (
@@ -46,8 +47,10 @@ export function MilestoneCell({ m, onClick }: { m: any; onClick?: () => void }) 
       </div>
       <div className="ms-sub">
         <RiskBadge risk={m.risk} /> <Variance days={m.varianceDays} />
+        {m.confidence && m.confidence !== 'FIRM' && !m.complete && <span className={`conf conf-${m.confidence}`} title={m.confidence === 'OPEN' ? 'Depends on an undated readiness input' : 'Depends on forecast readiness dates'}>{m.confidence === 'OPEN' ? 'open' : 'cond.'}</span>}
         {m.varianceVsOriginalDays !== m.varianceDays && m.varianceVsOriginalDays > 0 && <span className="muted small" title="vs original commitment"> orig +{m.varianceVsOriginalDays}</span>}
       </div>
+      {m.total > 1 && !m.complete && m.done > 0 && <div className="small muted">{m.progressLabel}</div>}
       {m.delay && m.varianceDays > 0 && <div className="ms-cause" title={m.delay.reason}>{m.delay.reason}</div>}
     </div>
   );
@@ -105,6 +108,10 @@ export function ImpactView({ result, compact }: { result: any; compact?: boolean
         <div className="alert err"><strong>Invalid schedule — cannot be committed</strong>
           <ul>{result.violations.map((v: any, i: number) => <li key={i}>{v.message}</li>)}</ul></div>
       )}
+      {(result.structural ?? []).some((x: any) => x.notes.length || x.warnings.length) && (
+        <div className="alert info small"><b>Structural changes</b><ul>{result.structural.flatMap((x: any) => [...x.notes.map((n: string) => <li key={n}>{n}</li>), ...x.warnings.map((w: string) => <li key={w} className="late">⚠ {w}</li>)])}</ul></div>
+      )}
+      {(result.impactedShipments ?? []).length > 0 && <div className="small">Deliveries affected: {result.impactedShipments.map((s: any) => <span key={s.shipmentId} className="pill">{s.code}{s.frozen ? ' ❄' : ''}</span>)}</div>}
       <table className="grid tight">
         <thead><tr><th>#</th><th>Project</th><th>Freeze</th><th>EOL</th><th>ExWorks</th><th>Commissioned</th><th>Acts</th></tr></thead>
         <tbody>
@@ -115,7 +122,9 @@ export function ImpactView({ result, compact }: { result: any; compact?: boolean
               <td>{p.frozen ? <span className="frozen" title={`Frozen since ${p.freezeStartDate}`}>❄ frozen</span> : ''}</td>
               {['EOL', 'EXW', 'COMM'].map((t) => {
                 const m = p.milestones[t];
+                if (!m) return <td key={t} className="muted">—</td>;
                 return <td key={t}>{m.deltaDays ? <span>{short(m.beforeLabel)} → <b>{short(m.afterLabel)}</b> <Variance days={m.deltaDays} /></span> : <span className="muted">{short(m.afterLabel)}</span>}
+                  {m.confidenceBefore !== m.confidenceAfter && <span className={`conf conf-${m.confidenceAfter}`} title={`Confidence ${m.confidenceBefore} → ${m.confidenceAfter}`}>{m.confidenceAfter.toLowerCase()}</span>}
                   {t === 'COMM' && p.lateVsRequired && <span className="late-flag" title={`Customer date ${p.requiredDate}`}> ⚠ late</span>}</td>;
               })}
               <td>{p.changedActivities || ''}</td>
@@ -128,6 +137,18 @@ export function ImpactView({ result, compact }: { result: any; compact?: boolean
           <table className="grid tight"><tbody>{result.displaced.slice(0, 40).map((d: any) => (
             <tr key={d.activityId}><td>{result.projects.find((p: any) => p.id === d.projectId)?.code}</td><td>{d.name}</td><td>+{d.delayDays} d</td>
               <td className="muted">by {d.byProjects.map((x: number) => result.projects.find((p: any) => p.id === x)?.code).join(', ')}</td></tr>
+          ))}</tbody></table></details>
+      )}
+      {!compact && (result.addedActivities ?? []).length > 0 && (
+        <details open><summary>Added work ({result.addedActivities.length})</summary>
+          <table className="grid tight"><tbody>{result.addedActivities.slice(0, 60).map((a: any) => (
+            <tr key={a.activityId}><td>{result.projects.find((p: any) => p.id === a.projectId)?.code}</td><td>{a.unit ?? ''}</td><td>{a.name}</td><td>{slotLabel(a.start)} → {finishLabel(a.finish)}</td></tr>
+          ))}</tbody></table></details>
+      )}
+      {!compact && (result.removedActivities ?? []).length > 0 && (
+        <details><summary>Removed / cancelled work ({result.removedActivities.length})</summary>
+          <table className="grid tight"><tbody>{result.removedActivities.slice(0, 60).map((a: any) => (
+            <tr key={a.activityId}><td>{result.projects.find((p: any) => p.id === a.projectId)?.code}</td><td>{a.unit ?? ''}</td><td>{a.name}</td></tr>
           ))}</tbody></table></details>
       )}
       {!compact && result.changedActivities.length > 0 && (
@@ -149,13 +170,14 @@ export function ImpactView({ result, compact }: { result: any; compact?: boolean
 }
 
 /** Simulate → review → commit flow for a set of scenario operations. */
-export function ChangeFlow({ ops, name, source, onDone, defaultReason }: { ops: any[]; name: string; source?: string; onDone: () => void; defaultReason?: string }) {
+export function ChangeFlow({ ops, name, source, onDone, onCommitted, defaultReason }: { ops: any[]; name: string; source?: string; onDone: () => void; onCommitted?: () => void; defaultReason?: string }) {
   const { toast, can } = useApp();
   const [result, setResult] = useState<any>(null);
   const [scenarioId, setScenarioId] = useState<number | null>(null);
   const [just, setJust] = useState(defaultReason ?? '');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [reviewed, setReviewed] = useState(false);
   useEffect(() => {
     let alive = true;
     api('/scenarios', { body: { name, ops, source } })
@@ -163,7 +185,7 @@ export function ChangeFlow({ ops, name, source, onDone, defaultReason }: { ops: 
       .catch((e) => alive && setErr(e.message));
     return () => { alive = false; };
   }, []);
-  const commit = async (confirmLatest = false) => {
+  const commit = async (confirmLatest = reviewed) => {
     if (!scenarioId) return;
     setBusy(true);
     setErr(null);
@@ -171,9 +193,10 @@ export function ChangeFlow({ ops, name, source, onDone, defaultReason }: { ops: 
       const r = await api(`/scenarios/${scenarioId}/commit`, { body: { justification: just || undefined, confirmLatest } });
       if (r.status === 'PENDING_APPROVAL') toast('Submitted for Management / Program approval (frozen projects affected)', 'info');
       else toast(`Committed — plan version ${r.version}`, 'ok');
+      onCommitted?.();
       onDone();
     } catch (e: any) {
-      if (e.code === 'STALE_SIMULATION') { setResult(e.details.result); setErr('The plan changed meanwhile — impact updated below. Review and commit again.'); }
+      if (e.code === 'STALE_SIMULATION' || e.code === 'STALE_SCENARIO') { setReviewed(true); setResult(e.details.result); setErr(`Planning inputs changed since the simulation${e.details.stale ? ` (${e.details.stale.join(', ')})` : ''} — impact re-simulated below. Review and commit again.`); }
       else setErr(e.message);
     } finally { setBusy(false); }
   };

@@ -331,6 +331,44 @@ form.ask input { flex: 1; padding: 8px; }
 .ms-diamond.risk-COMPLETE { background: #6c7a89; }
 .ms-diamond.approved { width: 12px; height: 12px; top: 11px; background: transparent; border: 2px solid #1d4f9c; box-shadow: none; z-index: 4; }
 
+/* V4: confidence, readiness gates, demand, partial milestones */
+.bar.conf-CONDITIONAL { box-shadow: inset 0 0 0 1.5px rgba(255,255,255,.85), 0 0 0 1px rgba(0,0,0,.15); background-image: repeating-linear-gradient(90deg, rgba(255,255,255,.22) 0 6px, transparent 6px 12px); }
+.bar.conf-OPEN { background-image: repeating-linear-gradient(-45deg, rgba(255,255,255,.45) 0 3px, transparent 3px 7px); opacity: .82; }
+.lg.cond { background: repeating-linear-gradient(90deg, #2f6fdd 0 6px, #8fb2ee 6px 12px); }
+.lg.open { background: repeating-linear-gradient(-45deg, #2f6fdd 0 3px, #c9d9f6 3px 7px); }
+.lg.gate { width: 9px; height: 9px; transform: rotate(45deg); background: #fff; border: 2px solid var(--amber); border-radius: 1px; }
+.gate-mark { position: absolute; top: 5px; width: 9px; height: 9px; transform: rotate(45deg); background: #fff; border: 2px solid var(--amber); z-index: 4; border-radius: 1px; }
+.gate-mark.blocked { border-color: var(--red); background: #fde4e4; }
+.gate-mark.unknown { border-color: #6b7785; border-style: dashed; }
+.ms-diamond.small { width: 11px; height: 11px; top: 8px; }
+.ms-diamond.small span { font-size: 7px; }
+.demand { font-size: 10px; font-weight: 700; border-radius: 3px; padding: 0 4px; border: 1px solid; }
+.demand.d-TENTATIVE { color: #7a5a00; border-color: #e5c97a; background: #fff7dd; }
+.demand.d-APPROVED { color: #2b5a9e; border-color: #b7cdf0; background: #eef4fd; }
+.g-row.group { background: #fbfcfd; }
+.g-row.group .g-label { background: #fbfcfd; font-size: 12px; }
+.g-row.group .bar.compact { top: 7px; height: 12px; }
+.conf { font-size: 10.5px; font-weight: 700; border-radius: 10px; padding: 0 6px; white-space: nowrap; }
+.conf-FIRM { color: #1f7a45; background: #e2f5ea; }
+.conf-CONDITIONAL { color: #8a5a00; background: #fff1d6; }
+.conf-OPEN { color: #8a2d2d; background: #fde4e4; }
+.gs { font-size: 10.5px; font-weight: 700; border-radius: 3px; padding: 0 5px; white-space: nowrap; }
+.gs-READY { color: #1f7a45; background: #e2f5ea; }
+.gs-PENDING { color: #8a5a00; background: #fff1d6; }
+.gs-BLOCKED { color: #fff; background: var(--red); }
+.gs-UNKNOWN { color: #4b5563; background: #e5e7eb; border: 1px dashed #9ca3af; }
+.pill { display: inline-block; font-size: 10.5px; border: 1px solid var(--line); border-radius: 10px; padding: 0 6px; margin: 1px 2px 1px 0; background: #fff; white-space: nowrap; }
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin: 8px 0; flex-wrap: wrap; }
+.tabs button { background: none; border: none; color: var(--muted); border-bottom: 2px solid transparent; border-radius: 0; padding: 6px 10px; }
+.tabs button.on { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+.statgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin: 8px 0; }
+.stat { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+.stat b { display: block; font-size: 20px; }
+.stat span { color: var(--muted); font-size: 11.5px; }
+.decision-row.need td { background: #fffaf0; }
+.basket { position: sticky; bottom: 0; background: #fff; border: 1px solid var(--accent); border-radius: 6px; padding: 8px 10px; margin-top: 10px; box-shadow: 0 -4px 16px rgba(0,0,0,.06); }
+.wrap { white-space: normal; }
+
 @media (max-width: 900px) {
   .daily-grid { grid-template-columns: 1fr; }
   .daily-grid .wide2 { grid-column: span 1; }
@@ -339,3 +377,7 @@ form.ask input { flex: 1; padding: 8px; }
   .card.wide { grid-column: span 1; }
   .g-label { width: 180px; min-width: 180px; }
 }
+.button-like .btn { display: inline-block; border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 5px; padding: 5px 11px; cursor: pointer; }
+.alert.ok { background: #e8f6ee; border-color: #b9e2c9; color: #1f5f3a; }
+.alert.warn { background: #fff6e5; border-color: #f3d6ae; color: #6b4a00; }
+.clickable { cursor: pointer; }

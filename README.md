@@ -1,6 +1,8 @@
 # EV Production Planner
 
-A multi-user production planning & execution application for an EV-charging manufacturer (power cabinets and dispensers), covering the flow from PCBA manufacturing to in-field commissioning. It's the shared operational plan for Commercial, Manufacturing, Testing, R&D, Logistics, Service and Program Management.
+A multi-user production planning & execution application for an EV-charging manufacturer (power cabinets, dispensers and charge docks), covering the flow from PCBA manufacturing to in-field commissioning. It's the shared operational plan for Commercial, Manufacturing, Testing, R&D, Logistics, Service and Program Management.
+
+**Version 4** adds readiness & handovers, physical units / complete systems / shipment manifests / site visits, multi-resource scheduling (EOL positions and shared tester, skids held until removal, shared R&D supply, crews), critical-component tracking, software release gates, test records separate from execution, quality holds and rework as scheduled work, unit reassignment, split deliveries, conditional planning with confidence, a daily-call change basket, a weekly outbound review and a controlled import of the OM Ramp-Up Tracker workbook. See [What's new in V4](#whats-new-in-v4).
 
 * **Backend:** Node 22, TypeScript, Express, PostgreSQL 16, WebSocket (`ws`)
 * **Frontend:** React 19, TypeScript, Vite (custom hierarchical Gantt, no chart library)
@@ -20,7 +22,7 @@ docker compose up --build
 # open http://localhost:4000
 ```
 
-On an empty database the app migrates the schema and loads master data plus 8 demonstration projects. Set `SEED_DEMO=0` to skip the demo data.
+On an empty database the app migrates the schema and loads master data plus 9 demonstration projects (synthetic). Set `SEED_DEMO=0` to skip the demo data. A V3 demo database is reset automatically on upgrade (schema version 4); a non-demo V3 database is refused unless `RESET_DB_ON_UPGRADE=1`.
 
 ### Option B: Local Node + PostgreSQL
 
@@ -41,7 +43,9 @@ Development (hot reload): `npm run dev -w server` (API on :4000) and `npm run de
 
 | User | Role |
 |---|---|
-| `program`, `program2` | Management / Program (full rights, freeze override) |
+| `program`, `program2` | Management / Program (full rights, freeze override, import) |
+| `techauth` | R&D technical authority (approves software releases and test scopes) |
+| `quality` | Quality (dispositions, holds, test-result release, conditional release) |
 | `commercial` | Commercial |
 | `mfg` | Manufacturing |
 | `test` | Testing |
@@ -71,8 +75,26 @@ All planning parameters (capacities, calendars, routes, durations, freeze horizo
 ## Tests
 
 ```bash
-npm test        # 27 tests: engine (pure) + API acceptance tests against PostgreSQL
+npm test        # 49 tests: engine (pure) + API acceptance tests against PostgreSQL
 ```
+
+Meeting-derived acceptance tests (`api.test.ts`, section "Meeting-derived acceptance tests (V4)"):
+
+| Test | Rule |
+|---|---|
+| M1 | A part missing from the BOM raises a BOM-correction action and a material gate on the first operation needing it; stock/receipts are never allocated twice; the BOM is never edited silently |
+| M2 | An announced firmware never satisfies a gate; EOL cannot complete until the release is approved for the use, its artifact is available and it is installed with checks passed |
+| M3 | Borrowing a unit: the simulation shows donor and recipient impacts and rolls back; the committed swap keeps the physical identity, records SWAP_OUT history and gives the donor a replacement flow |
+| M4/M5 | Non-production occupancy (removal crew, shared R&D supply) delays validation and packaging |
+| M6 | Test durations cannot be cut by a schedule change; reduced validation needs a test scope approved by the technical authority |
+| M7 | Packaged but documents incomplete → dispatch blocked; a document needs a reference to be ready |
+| M8 | Solo → Charge Dock: draft configuration shows reconciliation differences, must be approved, is applied through a scenario and raises a Logistics acknowledgment |
+| M9 | Two systems delivered first: per-delivery ExWorks, freeze and "x of y" progress |
+| M10 | A delay inside the freeze is accepted as execution fact; delays need an explanation |
+| M11 | A scenario simulated on older inputs is stale and must be re-simulated before commit |
+| M12 | Information from an older meeting (`asOf`) cannot overwrite newer state |
+| M13 | Tentative demand is planned indicatively and never displaces committed work |
+| Import ×3 | Tracker preview requires decisions for ambiguous names; apply creates projects/units/readiness/progress, remembers aliases; re-import matches, fills new units and refuses an older workbook |
 
 | Spec test | Where |
 |---|---|
@@ -126,13 +148,10 @@ Every plan mutation runs in one transaction under a PostgreSQL advisory lock. Ea
 * The **21-day freeze** always counts calendar days.
 
 ### Data model
-`Project → Order line → Physical unit → Activities`. Each unit gets the full routing (13 standard steps, durations per product in `routing_steps`) as its own flow. Shipment is one activity per consolidated delivery and depends on every unit's packaging. Commissioning is per unit and depends on the shipment. `units.batch_id` is reserved for future batch planning. **Batch planning is not implemented.**
+`Project → order line → physical unit → complete system → shipment manifest → site visit`, with unit, system, shipment and site activities generated from versioned routings (see [What's new in V4](#whats-new-in-v4)). Each unit gets its own flow with full standard durations (no quantity efficiencies). `units.batch_id` is reserved for future batch planning. **Batch planning is not implemented.**
 
 ### Finite capacity
-Each work center has `capacity` (effective units per half-day), `max_concurrent` and `min_rate`:
-* Discrete work centers (e.g. FA = 3, Validation = 2) book one unit per system.
-* **EOL testing = 1.5 effective units, max 2 concurrent, min rate 0.5.** One system alone tests at full rate. A second system can overlap only on the remaining 0.5 and therefore takes longer. A third cannot start. This approximation is shown in the UI and in `settings.eol_capacity_model`. Phase-level modelling is a deferred extension.
-* Bookings never exceed capacity. Manual placements that would exceed it are reported as violations, and the commit is refused. Overloads that come from actual execution (for example two systems already in progress) are listed, never hidden.
+Resources have a type (station, position, skid, shared equipment, personnel pool, team, area) and a capacity in units per half-day. An activity books every resource of each of its phases; a resource can stay **held** across activities (a skid from setup until removal). Bookings never exceed capacity; manual placements that would exceed it are violations and the commit is refused; overloads caused by actual execution are listed, never hidden. EOL uses two EOL positions and one shared power tester with a conservative provisional profile until Testing defines the phases.
 
 ### Mode A: initial backward plan
 When a project is created, its activities are placed **backward** from the end of the required commissioning day against capacity already reserved by other projects. The result is replayed forward, and the anchor is refined by a shortfall step plus binary search to find the latest plan that still protects the date. If no plan fits after "now", the project is flagged **INFEASIBLE** and the earliest achievable commissioning (an ASAP forward plan) is stored. The accepted plan becomes the **baseline = approved = forecast**, with BASELINE milestone commitments.
@@ -159,7 +178,7 @@ Every execution update, scenario commit or time tick recalculates the program fo
 Each milestone keeps its original committed date (baseline), latest approved date, forecast, actual, working-day variance, risk and delay explanation. The full re-commitment history is in `milestone_commitments`, so earlier misses remain visible after re-planning.
 
 ### Freeze and governance
-* Freeze start = **persisted** forecast ExWorks − `freeze_days` (21) calendar days. For multi-shipment projects the earliest open shipment counts.
+* Freeze start = **persisted** forecast ExWorks − `freeze_days` (21) calendar days, per delivery (`freeze_policy.scope = SHIPMENT`), inclusive and persistent by default (both still marked as decisions to approve in `settings.freeze_policy`).
 * Discretionary changes are scenario ops: priority, activity moves, durations, capacity, weekend work, pull-in, re-plan. A scenario is always simulated first. At commit it is **re-simulated on the current persisted plan** and the freeze check is repeated. A simulated forecast never feeds its own freeze check.
 * If a change affects a frozen project: Commercial's commit becomes `PENDING_APPROVAL`, and Management can commit only with a justification. The result is recorded as `OVERRIDE` in the audit and in the milestone commitments.
 * Execution updates (status, actuals, blockers, reported delays) are **always** allowed for the responsible function, even inside the freeze, and update the forecast immediately.
@@ -204,12 +223,34 @@ Each milestone keeps its original committed date (baseline), latest approved dat
 
 ---
 
+## What's new in V4
+
+**Structure.** `Project → order line → physical unit` (stable internal id `EVU-…` before the serial is known; hardware revision, routing version, location, installed software, quality disposition, append-only `unit_history`) `→ complete system` (one validation per system) `→ shipment manifest` (per-delivery ExWorks and freeze) `→ site visit` (installation per intervention, commissioning per system). Activities are scoped UNIT / SYSTEM / SHIPMENT / SITE and generated from dated, versioned routings; dependencies and resource holds are always rebuilt from current membership, so configuration changes, reassignment, regrouping, visit splits and inserted rework share one code path. Partial completion is shown as "2 of 5 systems commissioned".
+
+**Resources.** Activities consume several resources in contiguous phases (`routing_steps.phases`): EOL uses an EOL position plus the shared power tester. Testing has not yet defined which sub-steps need the shared tester, so a **conservative provisional profile** (no overlap) is used and labelled; a phased profile can be entered per routing step. Skids are **held** from setup until disconnection & removal (needs the handling crew); the shared R&D supply, R&D engineers, pre-commissioning bench, commissioning teams, rework station and ME/QA personnel are separate resources. Non-production occupancy (troubleshooting, regression, test development, setup, removal, maintenance) is reserved explicitly. Capacity changes are effective-dated and go proposed → approved → implemented → verified; only implemented capacity feeds the executable plan.
+
+**Readiness.** Every operation can have readiness gates (configuration, material, software, resource, quality, external) with owner, status (Unknown / Pending / Ready / Blocked — unknown is never green), required-by, forecast, evidence and last confirmation. Gates are derived from their source records where one exists (material allocations, release approvals, test releases, documents, booking, site data, Logistics acknowledgment, quality holds) and are otherwise maintained by their owner with evidence. A **conditional release** records scope, conditions, approver and expiry. A dated forecast makes dependent dates **conditional**; an undated open item makes them **open** (open-ended uncertainty). Confidence propagates through predecessors and resource holds and is shown on every milestone, project and Gantt bar.
+
+**Demand.** Projects are tentative, approved or committed. Committed demand is scheduled first; approved and tentative demand get an indicative plan without commitments and never displace committed work. `commit_demand` turns approved demand into a commitment through a scenario.
+
+**Materials, software, tests, quality.** Lightweight critical-component tracking (stock and expected receipts allocated by priority, never twice; requirements outside the BOM raise BOM-correction actions). Software/firmware releases go candidate → validation → approved for a scope (evaluation units, specific units, production, field) → artifact available → installed → checks passed; announcements never satisfy a gate; a routing change for a software update inserts an update operation plus retest. Test records (pass/fail/inconclusive, released or not) are separate from execution status; results are flagged for review after swaps, configuration or firmware changes; reduced validation requires an approved test scope. Quality holds/dispositions, issues mirroring the external tracker (never merged automatically), rework packages with preparation, hands-on and retest as scheduled work.
+
+**Governance.** The freeze applies per delivery to all consequential changes including indirect impacts, uses the persisted forecast, is re-checked at commit; scenarios record per-project input versions and become stale when inputs change. Older information (`asOf`) cannot overwrite newer state. Seven roles plus narrow named capabilities (`release.approve`, `test_scope.approve`, `quality.release`, `quality.disposition`, `gate.conditional_release`, `material.confirm`, `configuration.approve`, `logistics.acknowledge`, …).
+
+**New pages.** *Readiness* (all gates and open actions), *Outbound* (weekly review: ExWorks vs dispatch, service profile and its confirmation, booking deadline, documents, held units, unacknowledged configuration changes), *Materials · SW · Quality*, *Import*. The Daily Control gets a **change basket** (collect proposals during the call, simulate them together, commit once), readiness needed in the next 10 days, physical handovers, outbound and open actions. Project pages get Units, Shipments & site, Readiness, Materials, Tests & quality, Configuration and Actions tabs. The Gantt shows systems, shipments and site visits, confidence styling, open-gate markers, per-delivery milestones and product-family / demand filters.
+
+### Importing the OM Ramp-Up Tracker
+
+*Import* (Management/Program, `import.apply`) reads the workbook on the server: **Priority** sheet → projects with order lines, required dates (only an unambiguous dd.mm.yyyy is exact; weeks, months, "tbc", "CHANGE: …" are indicative), customer situation, SAP order, O2C owner, mitigations, configuration attributes; **Production Plan** → physical units (name, serial, item code → product, maturity → hardware revision, system grouping, batches → deliveries, confirmed ExWorks → imported per-delivery commitments, sub-assembly/component colours → readiness gates, timeline P/EOL spans → actuals, EOL status → unreleased test records); **On Site Plan** → site visits (dates with planned/effective state, roles); **EAP SW Versions** → release candidates with known issues; **Test status** → test coverage; **Tracker** → open topics as action items. The preview lists every interpretation; ambiguous or unmatched names must be confirmed and are remembered as aliases. Tracker progress only moves forward, never overwrites application actuals or gate states changed in the app, and an older workbook is refused unless a reason is given. The workbook and its contents stay in the database; nothing is committed to the repository.
+
+---
+
 ## Scope notes
 
-Not implemented in the MVP, as specified: batch production optimization, ERP/MES integration, phase-level EOL modelling, automated optimization of all work centers, advanced AI optimization, multi-site logistics, materials planning. The schema leaves room for them: `units.batch_id`, work-center capacity models, shipments per project, and routing predecessors as arrays.
+Not implemented, as specified: batch production optimization, ERP/MES integration (imports are file-based and reviewed), automated optimization of all work centers, advanced AI optimization, full MRP (critical components only), offline editing. The schema leaves room for them: `units.batch_id`, work-center capacity models, shipments per project, and routing predecessors as arrays.
 
 Modelling approximations to be aware of:
-* EOL partial parallelism uses the effective-units approximation described above.
+* EOL partial parallelism uses the conservative provisional profile until Testing defines the phases (V4); the V3 effective-units description above is superseded.
 * Priority allocation is project-by-project (serial schedule generation). Within a project, activities are scheduled by earliest start.
 * Transport is not capacity-constrained.
 * `settings.clock_override` exists for demos and tests. Leave it `null` in production.

@@ -3,11 +3,13 @@ import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { ActivityPanel } from '../components/ActivityPanel';
 import { ChangeFlow, FnTag, Modal, RiskBadge, StatusBadge, Variance } from '../components/ui';
+import { ActionList, ConfBadge, GateStatus } from '../components/v4';
 import { useApp, useLive } from '../store';
 import { fmtTs } from '../time';
 
 export function DailyControl() {
-  const { can, toast, user, presence, events } = useApp();
+  const { can, toast, user, presence, events, basket, addToBasket, removeFromBasket, clearBasket } = useApp();
+  const [basketFlow, setBasketFlow] = useState(false);
   const { data, reload } = useLive<any>('/daily');
   const [panel, setPanel] = useState<{ id: number; unit: string } | null>(null);
   const [prio, setPrio] = useState<{ projectId: number; toRank: number; code: string } | null>(null);
@@ -85,9 +87,11 @@ export function DailyControl() {
             <tbody>{data.projects.map((p: any, i: number) => (
               <tr key={p.id}>
                 <td className="nowrap"><b>{p.priority}</b>{can('scenario.op.priority') && <span className="rank-btns">
-                  <button className="icon" disabled={i === 0} onClick={() => setPrio({ projectId: p.id, toRank: p.priority - 1, code: p.code })}>▲</button>
-                  <button className="icon" disabled={i === data.projects.length - 1} onClick={() => setPrio({ projectId: p.id, toRank: p.priority + 1, code: p.code })}>▼</button></span>}</td>
-                <td><Link to={`/projects/${p.id}`}><b>{p.code}</b></Link> <span className="small muted">{p.name}</span>{p.freeze.frozen && <span className="frozen"> ❄</span>}{p.openBlockers > 0 && <span className="tag-red small"> {p.openBlockers}⛔</span>}</td>
+                  <button className="icon" title="Add to the change basket" disabled={i === 0} onClick={() => addToBasket({ label: `${p.code} to rank ${p.priority - 1}`, op: { type: 'move_priority', projectId: p.id, toRank: p.priority - 1 } })}>▲</button>
+                  <button className="icon" title="Add to the change basket" disabled={i === data.projects.length - 1} onClick={() => addToBasket({ label: `${p.code} to rank ${p.priority + 1}`, op: { type: 'move_priority', projectId: p.id, toRank: p.priority + 1 } })}>▼</button>
+                  <button className="icon" title="Simulate this move alone" onClick={() => setPrio({ projectId: p.id, toRank: Math.max(1, p.priority - 1), code: p.code })}>⇡</button></span>}</td>
+                <td><Link to={`/projects/${p.id}`}><b>{p.code}</b></Link> <span className="small muted">{p.name}</span>{p.demandStatus !== 'COMMITTED' && <span className={`demand d-${p.demandStatus}`}>{p.demandStatus === 'TENTATIVE' ? 'T' : 'A'}</span>}{p.freeze.frozen && <span className="frozen"> ❄</span>}{p.openBlockers > 0 && <span className="tag-red small"> {p.openBlockers}⛔</span>} <ConfBadge c={p.confidence} />
+                  {p.readiness.nextBlocker && <div className="small muted">▸ {p.readiness.nextBlocker.title} ({p.readiness.nextBlocker.owner ?? 'no owner'})</div>}</td>
                 <td className="small">{p.nextMilestone?.label ?? 'done'}</td>
                 {['EOL', 'EXW', 'COMM'].map((t) => { const m = p.milestones.find((x: any) => x.type === t); return <td key={t} className="small nowrap" title={m?.delay?.reason ?? ''}>{m?.complete ? '✓' : m?.forecastLabel.replace(/^\w{3} /, '').replace(/^\d{4}-/, '')} {m && !m.complete && <Variance days={m.varianceDays} />}</td>; })}
                 <td><RiskBadge risk={p.risk} /></td>
@@ -114,6 +118,32 @@ export function DailyControl() {
             </div>
           )}
         </section>
+        <section>
+          <h3>Readiness needed in the next 10 days <span className="count">{data.readinessGaps.length}</span></h3>
+          <table className="grid tight compact"><tbody>{data.readinessGaps.map((g: any) => (
+            <tr key={g.gate.id} className="clickable" onClick={() => setPanel({ id: g.activity.id, unit: g.activity.unit })}>
+              <td><GateStatus s={g.gate.status} /></td><td><b>{g.activity.project}</b> {g.activity.unit}</td><td className="wrap">{g.gate.title}<div className="small muted">{g.activity.name} · {g.activity.forecastStartLabel}</div></td>
+              <td className="small">{g.gate.owner ?? 'no owner'}{g.gate.forecastLabel ? ` · ${g.gate.forecastLabel}` : ''}</td></tr>
+          ))}{!data.readinessGaps.length && <tr><td className="muted">All near-term readiness confirmed.</td></tr>}</tbody></table>
+          <Link className="small" to="/readiness">All readiness →</Link>
+        </section>
+        <section>
+          <h3>Physical handovers (next 3 days) <span className="count">{data.handovers.length}</span></h3>
+          <ActTable rows={data.handovers} empty="No handovers due." actions />
+        </section>
+        <section>
+          <h3>Outbound (next 10 days)</h3>
+          <table className="grid tight compact"><tbody>{data.outbound.shipments.map((s: any) => (
+            <tr key={s.id}><td><b>{s.code}</b></td><td className="small">ExWorks {s.exworksReached ? '✓ ' : ''}{s.exworksLabel}</td>
+              <td className="small">{s.transportBooked ? 'booked' : s.bookingOverdue ? <span className="late">booking overdue</span> : 'not booked'}</td>
+              <td className="small">{s.missingDocuments.length ? <span className="late">missing: {s.missingDocuments.join(', ')}</span> : 'docs ready'}</td></tr>
+          ))}{!data.outbound.shipments.length && <tr><td className="muted">No deliveries in the next 10 days.</td></tr>}</tbody></table>
+          <Link className="small" to="/outbound">Weekly outbound review →</Link>
+        </section>
+        <section>
+          <h3>Open actions <span className="count">{data.openActions.length}</span></h3>
+          <ActionList actions={data.openActions.slice(0, 12)} onChanged={reload} />
+        </section>
         <section className="wide2">
           <h3>Today's planned activities <span className="count">{data.todays.length}</span></h3>
           <ActTable rows={data.todays} empty="Nothing planned today." actions />
@@ -127,7 +157,7 @@ export function DailyControl() {
           <ActTable rows={data.overdue} empty="Nothing overdue." actions />
         </section>
         <section>
-          <h3>Awaiting owner updates <span className="count">{data.awaitingUpdates.length}</span></h3>
+          <h3>Explanation required (planned start passed) <span className="count">{data.awaitingUpdates.length}</span></h3>
           <ActTable rows={data.awaitingUpdates} empty="All owners up to date." actions />
         </section>
         <section>
@@ -158,6 +188,18 @@ export function DailyControl() {
           <ul className="plain small">{events.filter((e) => e.kind !== 'TIME_TICK').map((e, i) => <li key={i}>{new Date(e.at).toLocaleTimeString()} — {e.summary}{e.userId === user?.id ? ' (you)' : ''}</li>)}{!events.length && <li className="muted">Changes from all users appear here in real time.</li>}</ul>
         </section>
       </div>
+      {basket.length > 0 && (
+        <div className="basket">
+          <b>Change basket ({basket.length})</b> <span className="muted small">— proposals from this call, simulated together so their combined effect on capacity and frozen deliveries is visible before one commit</span>
+          <div>{basket.map((b, i) => <span key={i} className="pill">{b.label} <button className="icon" onClick={() => removeFromBasket(i)}>✕</button></span>)}</div>
+          <div className="actions"><button className="secondary" onClick={clearBasket}>Clear</button><button onClick={() => setBasketFlow(true)}>Simulate together…</button></div>
+        </div>
+      )}
+      {basketFlow && (
+        <Modal wide title={`Daily call change basket — ${basket.length} change(s)`} onClose={() => setBasketFlow(false)}>
+          <ChangeFlow name={`Daily call: ${basket.map((b) => b.label).join('; ')}`.slice(0, 190)} source="DAILY_CALL" ops={basket.map((b) => b.op)} onDone={() => setBasketFlow(false)} onCommitted={clearBasket} />
+        </Modal>
+      )}
       {panel && <ActivityPanel id={panel.id} unitLabel={panel.unit} onClose={() => setPanel(null)} />}
       {prio && (
         <Modal wide title={`Move ${prio.code} to rank ${prio.toRank}`} onClose={() => setPrio(null)}>

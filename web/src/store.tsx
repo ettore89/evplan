@@ -16,7 +16,13 @@ interface Ctx {
   events: PlanEvent[];
   reload: () => Promise<void>;
   toast: (msg: string, kind?: 'ok' | 'err' | 'info') => void;
+  /** Daily-call change basket: proposals collected during the call, simulated together and committed once. */
+  basket: BasketItem[];
+  addToBasket: (item: BasketItem) => void;
+  removeFromBasket: (i: number) => void;
+  clearBasket: () => void;
 }
+export interface BasketItem { label: string; op: any }
 
 const AppCtx = createContext<Ctx>(null as any);
 export const useApp = () => useContext(AppCtx);
@@ -31,6 +37,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [events, setEvents] = useState<PlanEvent[]>([]);
   const [toasts, setToasts] = useState<{ id: number; msg: string; kind: string }[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
+  const [basket, setBasket] = useState<BasketItem[]>(() => { try { return JSON.parse(sessionStorage.getItem('evplan.basket') ?? '[]'); } catch { return []; } });
+  useEffect(() => { try { sessionStorage.setItem('evplan.basket', JSON.stringify(basket)); } catch { /* ignore */ } }, [basket]);
+  const addToBasket = useCallback((item: BasketItem) => setBasket((b) => [...b, item]), []);
+  const removeFromBasket = useCallback((i: number) => setBasket((b) => b.filter((_, k) => k !== i)), []);
+  const clearBasket = useCallback(() => setBasket([]), []);
 
   const toast = useCallback((msg: string, kind: 'ok' | 'err' | 'info' = 'info') => {
     const id = Math.random();
@@ -74,7 +85,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const can = useCallback((a: string) => permissions.includes(a), [permissions]);
   return (
-    <AppCtx.Provider value={{ user, permissions, can, meta, version, connected, presence, events, reload, toast }}>
+    <AppCtx.Provider value={{ user, permissions, can, meta, version, connected, presence, events, reload, toast, basket, addToBasket, removeFromBasket, clearBasket }}>
       {children}
       <div className="toasts">{toasts.map((t) => <div key={t.id} className={`toast ${t.kind}`}>{t.msg}</div>)}</div>
     </AppCtx.Provider>

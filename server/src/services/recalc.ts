@@ -4,7 +4,8 @@ import { drivingChain, forwardSchedule } from '../engine/scheduler.js';
 import type { Driver, PlanState, ScheduleResult } from '../engine/types.js';
 import { finishLabel } from '../engine/calendar.js';
 import { afterCommit } from '../db/pool.js';
-import { newVersion } from './common.js';
+import { currentSlot, newVersion } from './common.js';
+import { persistFreeze } from './projects.js';
 import { loadPlanState } from './state.js';
 import { broadcast } from './realtime.js';
 
@@ -46,12 +47,14 @@ export interface RecalcOutcome {
 }
 
 const SYSTEM_REASON: Partial<Record<Driver['type'], string>> = {
-  now: 'Planned start passed without start confirmation (awaiting owner update)',
-  overdue: 'Activity overdue against its expected completion (awaiting owner update)',
+  now: 'Explanation required: planned start passed without a start confirmation from the owner',
+  overdue: 'Explanation required: activity overdue against its expected completion, no owner update',
   blocked: 'Activity blocked — no progress possible until the blocker is resolved',
-  capacity: 'Work-center capacity contention',
+  capacity: 'Resource capacity contention',
   locked: 'Locked commitment',
+  gate: 'Readiness gate not resolved',
 };
+const EXPLANATION_REQUIRED = new Set<Driver['type']>(['now', 'overdue']);
 
 function driverJson(d: Driver) {
   return JSON.stringify(d);
@@ -62,13 +65,16 @@ function driverJson(d: Driver) {
  * Must be called inside a transaction holding the plan lock.
  */
 export async function recalculate(c: pg.PoolClient, ctx: RecalcContext): Promise<RecalcOutcome> {
-  // Activities whose predecessors are all finished become Ready to Start.
-  await c.query(`
-    UPDATE activities a SET status = 'READY', updated_at = now()
-    WHERE a.status = 'NOT_STARTED'
-      AND EXISTS (SELECT 1 FROM dependencies d WHERE d.succ_id = a.id)
-      AND NOT EXISTS (SELECT 1 FROM dependencies d JOIN activities p ON p.id = d.pred_id
-                      WHERE d.succ_id = a.id AND p.status NOT IN ('COMPLETED','CANCELLED'))`);
+  // An activity is Ready to Start only when its predecessors are finished AND its start gates are
+  // satisfied (or under an active conditional release) — never because the predecessor alone is done.
+  const nowSlot = ctx.state?.now ?? (await currentSlot(c));
+  const openStartGate = `EXISTS (SELECT 1 FROM readiness_gates g WHERE g.activity_id = a.id AND g.blocks = 'START' AND g.status <> 'READY'
+      AND NOT (g.conditional_release ? 'approvedBy' AND NOT g.conditional_release ? 'revokedAt'
+               AND (g.conditional_release->>'expirySlot' IS NULL OR (g.conditional_release->>'expirySlot')::int > ${Number(nowSlot)})))`;
+  const predsDone = `NOT EXISTS (SELECT 1 FROM dependencies d JOIN activities p ON p.id = d.pred_id WHERE d.succ_id = a.id AND p.status NOT IN ('COMPLETED','CANCELLED'))`;
+  await c.query(`UPDATE activities a SET status = 'READY', updated_at = now() WHERE a.status = 'NOT_STARTED'
+      AND EXISTS (SELECT 1 FROM dependencies d WHERE d.succ_id = a.id) AND ${predsDone} AND NOT ${openStartGate}`);
+  await c.query(`UPDATE activities a SET status = 'NOT_STARTED', updated_at = now() WHERE a.status = 'READY' AND (NOT ${predsDone} OR ${openStartGate})`);
 
   const state = ctx.state ?? (await loadPlanState(c));
   const result = forwardSchedule(state);
@@ -84,11 +90,11 @@ export async function recalculate(c: pg.PoolClient, ctx: RecalcContext): Promise
 
   // 1. Activity forecasts (+ approvals)
   const ids: number[] = [], fs: number[] = [], ff: number[] = [], drv: string[] = [], crit: boolean[] = [];
-  const wait: number[] = [], wk: boolean[] = [], flags: string[] = [], appr: boolean[] = [];
+  const wait: number[] = [], wk: boolean[] = [], flags: string[] = [], appr: boolean[] = [], conf: string[] = [], cgates: string[] = [];
   for (const [id, r] of result.acts) {
     ids.push(id); fs.push(r.start); ff.push(r.finish); drv.push(driverJson(r.driver)); crit.push(result.critical.has(id));
     wait.push(r.capacityWaitSlots); wk.push(r.weekend); flags.push(r.flags.join(','));
-    appr.push(!!ctx.approve?.activityIds.has(id));
+    appr.push(!!ctx.approve?.activityIds.has(id)); conf.push(r.confidence); cgates.push(r.confidenceGates.join(','));
   }
   await c.query(`
     UPDATE activities a SET forecast_start = v.fs, forecast_finish = v.ff, driver = v.drv::jsonb, is_critical = v.crit,
@@ -96,19 +102,19 @@ export async function recalculate(c: pg.PoolClient, ctx: RecalcContext): Promise
       approved_start = CASE WHEN v.appr THEN v.fs ELSE a.approved_start END,
       approved_finish = CASE WHEN v.appr THEN v.ff ELSE a.approved_finish END,
       baseline_start = CASE WHEN v.appr AND a.baseline_start IS NULL THEN v.fs ELSE a.baseline_start END,
-      baseline_finish = CASE WHEN v.appr AND a.baseline_finish IS NULL THEN v.ff ELSE a.baseline_finish END
+      baseline_finish = CASE WHEN v.appr AND a.baseline_finish IS NULL THEN v.ff ELSE a.baseline_finish END,
+      confidence = v.conf, confidence_gates = CASE WHEN v.cg = '' THEN '{}'::int[] ELSE string_to_array(v.cg, ',')::int[] END
     FROM (SELECT unnest($1::int[]) id, unnest($2::int[]) fs, unnest($3::int[]) ff, unnest($4::text[]) drv, unnest($5::bool[]) crit,
-                 unnest($6::int[]) wait, unnest($7::bool[]) wk, unnest($8::text[]) flags, unnest($9::bool[]) appr) v
-    WHERE a.id = v.id`, [ids, fs, ff, drv, crit, wait, wk, flags, appr]);
+                 unnest($6::int[]) wait, unnest($7::bool[]) wk, unnest($8::text[]) flags, unnest($9::bool[]) appr, unnest($10::text[]) conf, unnest($11::text[]) cg) v
+    WHERE a.id = v.id`, [ids, fs, ff, drv, crit, wait, wk, flags, appr, conf, cgates]);
 
   // 2. Capacity reservations
   await c.query('DELETE FROM reservations');
   const rAct: number[] = [], rWc: number[] = [], rSlot: number[] = [], rLoad: number[] = [];
-  const wcOf = new Map(state.activities.map((a) => [a.id, a.workCenterId]));
   for (const [id, r] of result.acts) {
-    const wc = wcOf.get(id);
-    if (!wc) continue;
-    for (const [s, l] of r.bookings) { rAct.push(id); rWc.push(wc); rSlot.push(s); rLoad.push(l); }
+    const agg = new Map<string, number>();
+    for (const [s, wc, l] of r.bookings) agg.set(`${wc}:${s}`, (agg.get(`${wc}:${s}`) ?? 0) + l);
+    for (const [k, l] of agg) { const [wc, s] = k.split(':').map(Number); rAct.push(id); rWc.push(wc); rSlot.push(s); rLoad.push(l); }
   }
   if (rAct.length) {
     await c.query(`INSERT INTO reservations (activity_id, work_center_id, slot, load)
@@ -123,10 +129,12 @@ export async function recalculate(c: pg.PoolClient, ctx: RecalcContext): Promise
     if (ch.kind !== 'root' || eventOf.has(ch.activityId)) continue;
     const r = result.acts.get(ch.activityId)!;
     const reason = SYSTEM_REASON[r.driver.type] ?? 'Schedule recalculation';
+    // Overdue work without an owner update is an "explanation required" exception — no reason is invented.
+    const kind = EXPLANATION_REQUIRED.has(r.driver.type) ? 'EXPLANATION_REQUIRED' : 'SYSTEM';
     const ins = await c.query(
       `INSERT INTO delay_events (activity_id, project_id, kind, origin_activity_id, reason, prev_start, prev_finish, new_start, new_finish, user_id, plan_version, category)
-       VALUES ($1,$2,'SYSTEM',$1,$3,$4,$5,$6,$7,NULL,$8,'SYSTEM') RETURNING id`,
-      [ch.activityId, ch.projectId, reason, ch.prevStart, ch.prevFinish, ch.newStart, ch.newFinish, version]);
+       VALUES ($1,$2,$3,$1,$4,$5,$6,$7,$8,NULL,$9,'SYSTEM') RETURNING id`,
+      [ch.activityId, ch.projectId, kind, reason, ch.prevStart, ch.prevFinish, ch.newStart, ch.newFinish, version]);
     eventOf.set(ch.activityId, ins.rows[0].id);
   }
   // user-reported roots: fill in the calculated dates
@@ -181,13 +189,13 @@ export async function recalculate(c: pg.PoolClient, ctx: RecalcContext): Promise
 
   // 4. Milestones
   const existing = await c.query('SELECT * FROM milestones');
-  const key = (p: number, t: string, s: number | null) => `${p}:${t}:${s ?? 0}`;
-  const exMap = new Map(existing.rows.map((m) => [key(m.project_id, m.type, m.shipment_id), m]));
+  const key = (p: number, t: string, s: number | null, v: number | null) => `${p}:${t}:${s ?? 0}:${v ?? 0}`;
+  const exMap = new Map(existing.rows.map((m) => [key(m.project_id, m.type, m.shipment_id, m.visit_id), m]));
   const changeOf = new Map(changes.map((ch) => [ch.activityId, ch]));
   const milestoneChanges: MilestoneChange[] = [];
   const impactedByRoot = new Map<number, unknown[]>();
   for (const m of result.milestones) {
-    const ex = exMap.get(key(m.projectId, m.type, m.shipmentId));
+    const ex = exMap.get(key(m.projectId, m.type, m.shipmentId, m.visitId ?? null));
     let rootEventId: number | null = ex?.last_delay_event_id ?? null;
     const changed = (ex?.forecast_slot ?? null) !== m.forecast;
     if (changed && m.forecast !== null && ex?.forecast_slot !== null && ex?.forecast_slot !== undefined && m.forecast > ex.forecast_slot && m.drivingActivityId) {
@@ -206,25 +214,25 @@ export async function recalculate(c: pg.PoolClient, ctx: RecalcContext): Promise
       await c.query(
         `UPDATE milestones SET forecast_slot=$2, actual_slot=$3, complete=$4, driving_activity_id=$5, last_delay_event_id=$6,
            approved_slot = CASE WHEN $7 THEN $2 ELSE approved_slot END,
-           baseline_slot = CASE WHEN $7 AND baseline_slot IS NULL THEN $2 ELSE baseline_slot END, updated_at = now()
+           baseline_slot = CASE WHEN $7 AND baseline_slot IS NULL THEN $2 ELSE baseline_slot END, confidence = $8, done = $9, total = $10, updated_at = now()
          WHERE id = $1`,
-        [ex.id, m.forecast, m.actual, m.complete, m.drivingActivityId, rootEventId, !!approve]);
+        [ex.id, m.forecast, m.actual, m.complete, m.drivingActivityId, rootEventId, !!approve, m.confidence, m.done, m.total]);
       id = ex.id;
     } else {
       const ins = await c.query(
-        `INSERT INTO milestones (project_id, shipment_id, type, forecast_slot, actual_slot, complete, driving_activity_id, approved_slot, baseline_slot)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8) RETURNING id`,
-        [m.projectId, m.shipmentId, m.type, m.forecast, m.actual, m.complete, m.drivingActivityId, approve ? m.forecast : null]);
+        `INSERT INTO milestones (project_id, shipment_id, visit_id, type, forecast_slot, actual_slot, complete, driving_activity_id, approved_slot, baseline_slot, confidence, done, total)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10,$11,$12) RETURNING id`,
+        [m.projectId, m.shipmentId, m.visitId ?? null, m.type, m.forecast, m.actual, m.complete, m.drivingActivityId, approve ? m.forecast : null, m.confidence, m.done, m.total]);
       id = ins.rows[0].id;
     }
     if (approve && m.forecast !== null && (ex?.approved_slot ?? null) !== m.forecast) {
       await c.query(
-        `INSERT INTO milestone_commitments (milestone_id, committed_slot, previous_slot, kind, reason, scenario_id, user_id) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [id, m.forecast, ex?.approved_slot ?? null, ex?.approved_slot === null || !ex ? 'BASELINE' : approving!.kind, approving!.reason, ctx.scenarioId ?? null, ctx.userId]);
+        `INSERT INTO milestone_commitments (milestone_id, committed_slot, previous_slot, kind, confidence, reason, scenario_id, user_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [id, m.forecast, ex?.approved_slot ?? null, ex?.approved_slot === null || !ex ? 'BASELINE' : approving!.kind, m.confidence, approving!.reason, ctx.scenarioId ?? null, ctx.userId]);
     }
     if (changed) {
       milestoneChanges.push({ milestoneId: id, projectId: m.projectId, type: m.type, prev: ex?.forecast_slot ?? null, next: m.forecast, rootEventId });
-      if (rootEventId && m.shipmentId === null) {
+      if (rootEventId && m.shipmentId === null && !m.visitId) {
         const l = impactedByRoot.get(rootEventId) ?? [];
         l.push({ projectId: m.projectId, type: m.type, prev: ex?.forecast_slot ?? null, next: m.forecast, prevLabel: finishLabel(ex?.forecast_slot), nextLabel: finishLabel(m.forecast) });
         impactedByRoot.set(rootEventId, l);
@@ -234,6 +242,12 @@ export async function recalculate(c: pg.PoolClient, ctx: RecalcContext): Promise
   for (const [ev, list] of impactedByRoot) {
     await c.query(`UPDATE delay_events SET impacted_milestones = impacted_milestones || $2::jsonb WHERE id = $1`, [ev, JSON.stringify(list)]);
   }
+
+  // Milestones that no longer exist (e.g. a removed shipment or visit) are cleaned up.
+  const live = new Set(result.milestones.map((m) => key(m.projectId, m.type, m.shipmentId, m.visitId ?? null)));
+  const dead = existing.rows.filter((m) => !live.has(key(m.project_id, m.type, m.shipment_id, m.visit_id)) && state.projects.some((p) => p.id === m.project_id)).map((m) => m.id);
+  if (dead.length) await c.query('DELETE FROM milestones WHERE id = ANY($1) AND NOT EXISTS (SELECT 1 FROM milestone_commitments mc WHERE mc.milestone_id = milestones.id)', [dead]);
+  await persistFreeze(c);
 
   if (!ctx.quiet) {
     const summary = {

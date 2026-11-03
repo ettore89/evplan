@@ -32,10 +32,32 @@ export async function todayDay(db: Db) {
   return dayOf(await currentSlot(db));
 }
 
+/** Role-based permission, or a narrow capability granted to this named user. */
 export async function can(db: Db, user: AuthUser, action: string): Promise<boolean> {
+  const cap = await db.query('SELECT 1 FROM user_capabilities WHERE user_id = $1 AND capability = $2', [user.id, action]);
+  if (cap.rows.length) return true;
   const r = await db.query('SELECT roles FROM permissions WHERE action = $1', [action]);
   if (!r.rows.length) return user.role === 'MANAGEMENT';
   return (r.rows[0].roles as string[]).includes(user.role);
+}
+
+export async function capabilitiesOf(db: Db, user: AuthUser): Promise<string[]> {
+  const r = await db.query(`SELECT action FROM permissions WHERE $1 = ANY(roles)
+    UNION SELECT capability FROM user_capabilities WHERE user_id = $2`, [user.role, user.id]);
+  return r.rows.map((x) => x.action);
+}
+
+/**
+ * Mark the planning inputs of projects as changed (actuals, configuration, materials, releases,
+ * capacity…). Scenarios simulated on older inputs of an affected project become stale.
+ */
+export async function bumpInputs(db: Db, projectIds: (number | null | undefined)[] | 'ALL') {
+  if (projectIds === 'ALL') {
+    await db.query(`UPDATE projects SET input_version = input_version + 1 WHERE status = 'ACTIVE'`);
+    return;
+  }
+  const ids = [...new Set(projectIds.filter((x): x is number => typeof x === 'number'))];
+  if (ids.length) await db.query('UPDATE projects SET input_version = input_version + 1 WHERE id = ANY($1)', [ids]);
 }
 
 export async function requirePermission(db: Db, user: AuthUser, action: string, message?: string) {
@@ -47,7 +69,7 @@ export async function requirePermission(db: Db, user: AuthUser, action: string, 
 export interface AuditInput {
   userId: number | null;
   action: string;
-  changeClass: 'EXECUTION' | 'APPROVED_CHANGE' | 'OVERRIDE' | 'PRIORITY' | 'CONFIG' | 'FORECAST' | 'COMMERCIAL' | 'SYSTEM';
+  changeClass: 'EXECUTION' | 'APPROVED_CHANGE' | 'OVERRIDE' | 'PRIORITY' | 'CONFIG' | 'FORECAST' | 'COMMERCIAL' | 'SYSTEM' | 'READINESS' | 'QUALITY' | 'MATERIAL' | 'SOFTWARE' | 'LOGISTICS' | 'IMPORT';
   entityType: string;
   entityId?: number | null;
   projectId?: number | null;

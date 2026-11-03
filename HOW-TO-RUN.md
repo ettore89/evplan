@@ -85,7 +85,31 @@ A command window is a plain text window where you type an instruction and press 
 | `logistics` | Logistics |
 | `service` | Service |
 
+The demo data is made up (fictional customers). To see **your own production data**, import your ramp-up tracker — see the next section.
+
 **Want to see two people working at once?** Open a second browser, or a private/incognito window, and log in as a different user. Changes made by one appear for the other straight away.
+
+---
+
+## Load your own data from the OM Ramp-Up Tracker (Excel)
+
+Your workbook stays on your laptop: it is read by the app running on your own computer and is never uploaded to GitHub or anywhere else.
+
+1. Log in as **`program`** and click **Import** in the top menu.
+2. Click **Upload workbook (.xlsx)…** and choose your latest `OM_Ramp_Up_Tracker.xlsx`.
+3. The app shows a **preview** — nothing is changed yet:
+   * how many projects, units, site plans, software releases and open topics it found;
+   * a yellow box listing the **decisions it needs from you**, for example a tracker text like "ACME Grp" that it cannot match on its own to the project "ACME Retail DE", or rows that look like R&D units.
+4. Work through the tables:
+   * **Unit name groups → projects**: pick the right project in each drop-down (or "Internal / R&D unit", or "Do not import"). "Accept all proposals" confirms all suggestions at once.
+   * **Site plans → projects**: same for the "On Site Plan" sheet.
+   * **Projects**: choose the destination country where it is unknown, and check the proposed demand status (committed / approved / tentative).
+   * **Options**: tick *Remove the demo projects* to start from your data only. Tick *Treat planned tracker dates in the past as actuals* if your tracker colours are not always updated.
+5. When the yellow box is gone, click **Apply import**. After about half a minute the Priority view, Gantt, Readiness and Outbound pages show your projects.
+
+If your tracker uses internal code names for products, or customer and site names from which the country can be recognised, an administrator can add them once under **Admin → Governance settings → import_rules** (for example `"productNamePatterns": [["mycodename", "X800"]]`). They stay in your database only.
+
+Next time you import a newer version of the tracker, your earlier name decisions are remembered, existing projects are updated, and anything already recorded in the app is never overwritten by the spreadsheet. An older workbook cannot replace a newer one unless you give a reason.
 
 ---
 
@@ -95,6 +119,7 @@ A command window is a plain text window where you type an instruction and press 
 |---|---|
 | Stop the app | Click inside the command window and press **Ctrl + C**. Or press **Stop** next to "evplan" in Docker Desktop. |
 | Start it again another day | Open Docker Desktop, then repeat **Step 3** and **Step 4**. It starts in under a minute after the first time, and your data is kept. |
+| Get the newest version of the app | Download the ZIP again (Step 2), replace the old folder, then repeat Step 3 and Step 4. If the new version changes the database layout, the demo data is reloaded automatically — import your tracker again afterwards. |
 | Wipe everything and start again with fresh demo data | In the command window type `docker compose down -v`, press **Enter**, then run `docker compose up --build` again. |
 
 ## Optional – switch on the full AI assistant

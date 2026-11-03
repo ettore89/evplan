@@ -7,6 +7,13 @@ import { fmtTs, slotLabel } from '../time';
 const OP_LABEL: Record<string, string> = {
   set_priority: 'Set ranking', move_priority: 'Move project in ranking', move_activity: 'Move activity', set_capacity: 'Capacity', weekend_work: 'Weekend work',
   set_duration: 'Duration', pull_in: 'Pull-in (allow earlier starts)', replan_backward: 'Backward re-plan',
+  add_reservation: 'Non-production reservation', include_capacity_change: 'Include dated capacity change', apply_test_plan: 'Apply test scope',
+  reassign_unit: 'Reassign / borrow unit', add_rework: 'Schedule rework', apply_configuration: 'Apply configuration version', regroup_units: 'Regroup delivery',
+  add_update_operation: 'Software update + retest', commit_demand: 'Commit demand', split_visit: 'Split site visit',
+};
+const OP_PERM: Record<string, string> = {
+  move_priority: 'scenario.op.priority', set_capacity: 'scenario.op.capacity', weekend_work: 'scenario.op.capacity', add_reservation: 'scenario.op.capacity',
+  commit_demand: 'scenario.op.configuration', pull_in: 'scenario.op.schedule', replan_backward: 'scenario.op.schedule', set_duration: 'scenario.op.schedule',
 };
 
 export function ScenariosView() {
@@ -32,6 +39,14 @@ export function ScenariosView() {
       case 'set_capacity': return `${wcName(o.workCenterId)} = ${o.capacity}`;
       case 'weekend_work': return `${o.workCenterId ? wcName(o.workCenterId) : `activity ${o.activityId}`} on ${o.date}`;
       case 'set_duration': return `activity ${o.activityId} = ${o.durationSlots / 2} d`;
+      case 'add_reservation': return `${wcName(o.workCenterId)} ${o.kind?.toLowerCase()} ${slotLabel(o.start)} → ${slotLabel(o.finish - 1)} (${o.units})`;
+      case 'reassign_unit': return `unit ${o.unitId} → ${pcode(o.toProjectId)}${o.replacesUnitId ? ` replacing unit ${o.replacesUnitId}` : ''}`;
+      case 'apply_configuration': return `configuration #${o.configurationId}`;
+      case 'apply_test_plan': return `test scope #${o.testPlanId} on ${o.activityIds.length} activities`;
+      case 'regroup_units': return `${o.unitIds.length} units → ${o.newShipment ? `new delivery ${o.newShipment.code}` : `delivery #${o.toShipmentId}`}`;
+      case 'add_rework': return `rework #${o.reworkId}`;
+      case 'add_update_operation': return `release #${o.releaseId} on ${o.unitIds.length} units`;
+      case 'split_visit': return `${o.systemIds.length} systems → ${o.visitCode ?? 'new visit'}`;
       default: return pcode(o.projectId);
     }
   };
@@ -43,7 +58,7 @@ export function ScenariosView() {
       else if (path === 'commit') toast(`Committed — plan version ${r.version}`, 'ok');
       reload();
     } catch (e: any) {
-      if (e.code === 'STALE_SIMULATION') { setDetail({ ...detail, result: e.details.result }); setErr('Plan changed since simulation — impact refreshed. Review and commit again.'); }
+      if (e.code === 'STALE_SIMULATION' || e.code === 'STALE_SCENARIO') { setDetail({ ...detail, result: e.details.result, stale: [] }); setErr(`Planning inputs changed since the simulation (${(e.details.stale ?? []).join(', ')}) — impact re-simulated. Review and commit again.`); }
       else setErr(e.message + (e.details?.violations ? ': ' + e.details.violations.map((v: any) => v.message).join('; ') : ''));
     }
   };
@@ -55,7 +70,12 @@ export function ScenariosView() {
   };
   const addOp = () => {
     const d = { ...draft };
-    for (const k of ['projectId', 'toRank', 'workCenterId', 'capacity', 'maxConcurrent', 'activityId', 'durationSlots']) if (d[k] !== undefined && d[k] !== '') d[k] = Number(d[k]);
+    for (const k of ['projectId', 'toRank', 'workCenterId', 'capacity', 'activityId', 'durationSlots', 'units']) if (d[k] !== undefined && d[k] !== '') d[k] = Number(d[k]);
+    if (d.type === 'add_reservation') {
+      const day = (iso: string) => Math.round(Date.parse(iso + 'T00:00:00Z') / 86400000);
+      Object.assign(d, { start: day(d.from) * 2, finish: (day(d.to ?? d.from) + 1) * 2, units: d.units ?? 1, kind: d.kind ?? 'TROUBLESHOOTING' });
+      delete d.from; delete d.to;
+    }
     setOps([...ops, d]);
   };
   const editable = detail && ['DRAFT', 'PENDING_APPROVAL'].includes(detail.status);
@@ -68,7 +88,8 @@ export function ScenariosView() {
             <div><span className={`sc-status sc-${s.status}`}>{s.status.replace('_', ' ')}</span> <b>{s.name}</b></div>
             <div className="small muted">{s.created_by_name} · {fmtTs(s.created_at)} {s.source !== 'USER' && `· ${s.source}`}</div>
             <div className="small">{s.summary}</div>
-            {s.requires_management && <div className="small frozen">❄ affects frozen projects</div>}
+            {s.requires_management && <div className="small frozen">❄ affects frozen deliveries</div>}
+            {s.stale?.length > 0 && <div className="small late" title="Inputs of these projects changed after the simulation">⟳ stale: {s.stale.join(', ')}</div>}
           </div>
         ))}
       </div>
@@ -81,6 +102,7 @@ export function ScenariosView() {
             <ul className="ops">{detail.ops.map((o: any, i: number) => <li key={i}><b>{OP_LABEL[o.type]}</b>: {describe(o)}</li>)}</ul>
             {detail.justification && <p className="small"><b>Justification:</b> {detail.justification}</p>}
             <p className="small muted">Simulated {fmtTs(detail.simulated_at)} on plan version {detail.base_version}. Freeze checks use persisted forecasts and are repeated at commit.</p>
+            {detail.stale?.length > 0 && <div className="alert warn">Stale: planning inputs of {detail.stale.join(', ')} changed after this simulation. Re-simulate before committing.</div>}
             <ImpactView result={detail.result} />
             {err && <div className="alert err">{err}</div>}
             {editable && (
@@ -103,18 +125,23 @@ export function ScenariosView() {
           <label className="field">Name <input value={name} onChange={(e) => setName(e.target.value)} /></label>
           <div className="row">
             <select value={draft.type} onChange={(e) => setDraft({ type: e.target.value })}>
-              {Object.entries(OP_LABEL).filter(([k]) => k !== 'set_priority' && k !== 'move_activity').filter(([k]) => can(['set_capacity', 'weekend_work'].includes(k) ? 'scenario.op.capacity' : k === 'move_priority' ? 'scenario.op.priority' : 'scenario.op.schedule')).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              {Object.entries(OP_LABEL).filter(([k]) => OP_PERM[k] && can(OP_PERM[k])).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
             </select>
-            {['move_priority', 'pull_in', 'replan_backward'].includes(draft.type) && <select value={draft.projectId ?? ''} onChange={(e) => setDraft({ ...draft, projectId: e.target.value })}><option value="">Project…</option>{pf?.projects.map((p: any) => <option key={p.id} value={p.id}>{p.priority}. {p.code} {p.name}</option>)}</select>}
+            {['move_priority', 'pull_in', 'replan_backward', 'commit_demand'].includes(draft.type) && <select value={draft.projectId ?? ''} onChange={(e) => setDraft({ ...draft, projectId: e.target.value })}><option value="">Project…</option>{pf?.projects.map((p: any) => <option key={p.id} value={p.id}>{p.priority}. {p.code} {p.name}</option>)}</select>}
             {draft.type === 'move_priority' && <input type="number" min={1} placeholder="rank" style={{ width: 70 }} value={draft.toRank ?? ''} onChange={(e) => setDraft({ ...draft, toRank: e.target.value })} />}
-            {['set_capacity', 'weekend_work'].includes(draft.type) && <select value={draft.workCenterId ?? ''} onChange={(e) => setDraft({ ...draft, workCenterId: e.target.value })}><option value="">Work center…</option>{meta?.workCenters.map((w: any) => <option key={w.id} value={w.id}>{w.name} ({w.capacity})</option>)}</select>}
+            {['set_capacity', 'weekend_work', 'add_reservation'].includes(draft.type) && <select value={draft.workCenterId ?? ''} onChange={(e) => setDraft({ ...draft, workCenterId: e.target.value })}><option value="">Work center…</option>{meta?.workCenters.map((w: any) => <option key={w.id} value={w.id}>{w.name} ({w.capacity})</option>)}</select>}
             {draft.type === 'set_capacity' && <input type="number" step="0.5" placeholder="capacity" style={{ width: 90 }} value={draft.capacity ?? ''} onChange={(e) => setDraft({ ...draft, capacity: e.target.value })} />}
             {draft.type === 'weekend_work' && <input type="date" value={draft.date ?? ''} onChange={(e) => setDraft({ ...draft, date: e.target.value })} />}
+            {draft.type === 'add_reservation' && <>
+              <select value={draft.kind ?? 'TROUBLESHOOTING'} onChange={(e) => setDraft({ ...draft, kind: e.target.value })}>{['TROUBLESHOOTING', 'REGRESSION', 'TEST_DEV', 'SETUP', 'REMOVAL', 'MAINTENANCE', 'OTHER'].map((k) => <option key={k}>{k}</option>)}</select>
+              <input type="date" title="from" value={draft.from ?? ''} onChange={(e) => setDraft({ ...draft, from: e.target.value })} />
+              <input type="date" title="to (inclusive)" value={draft.to ?? ''} onChange={(e) => setDraft({ ...draft, to: e.target.value })} />
+              <input type="number" placeholder="units" style={{ width: 70 }} value={draft.units ?? ''} onChange={(e) => setDraft({ ...draft, units: e.target.value })} /></>}
             {draft.type === 'set_duration' && <><input type="number" placeholder="activity id" style={{ width: 100 }} onChange={(e) => setDraft({ ...draft, activityId: e.target.value })} /><input type="number" placeholder="half-days" style={{ width: 90 }} onChange={(e) => setDraft({ ...draft, durationSlots: e.target.value })} /></>}
             <button className="secondary small" onClick={addOp}>Add</button>
           </div>
           <ul className="ops">{ops.map((o, i) => <li key={i}><b>{OP_LABEL[o.type]}</b>: {describe(o)} <button className="icon" onClick={() => setOps(ops.filter((_, j) => j !== i))}>✕</button></li>)}</ul>
-          <p className="hint">Priority rankings can also be dragged in the Priority View; activity moves are made in the Gantt or the daily call.</p>
+          <p className="hint">Priority rankings can also be dragged in the Priority View; activity moves are made in the Gantt or collected in the daily-call basket. Unit reassignment, configuration changes, rework and delivery regrouping are started from the project, quality and configuration pages.</p>
           <div className="actions"><button disabled={!ops.length} onClick={create}>Create & simulate</button></div>
         </Modal>
       )}

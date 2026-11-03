@@ -3,6 +3,9 @@ import { api } from '../api';
 import { useApp } from '../store';
 import { finishLabel, fmtTs, slotLabel } from '../time';
 import { ChangeFlow, FnTag, Modal, SlotInput, StatusBadge, STATUS_LABEL } from './ui';
+import { ConfBadge, DIM_LABEL, GateStatus } from './v4';
+
+const TEST_CODES = new Set(['EOL', 'VAL', 'RVAL', 'RW_RETEST', 'SW_RETEST']);
 
 const DRIVER_LABEL: Record<string, string> = {
   predecessor: 'Waiting for predecessor', approved: 'Approved planned start', now: 'Not started yet (start passed)', reported: 'Reported delay',
@@ -11,7 +14,8 @@ const DRIVER_LABEL: Record<string, string> = {
 };
 
 export function ActivityPanel({ id, onClose, unitLabel }: { id: number; onClose: () => void; unitLabel?: string }) {
-  const { version, toast, can, meta } = useApp();
+  const { version, toast, can, meta, addToBasket } = useApp();
+  const [swRelease, setSwRelease] = useState<number | null>(null);
   const [data, setData] = useState<any>(null);
   const [form, setForm] = useState<any>({});
   const [err, setErr] = useState<string | null>(null);
@@ -46,12 +50,15 @@ export function ActivityPanel({ id, onClose, unitLabel }: { id: number; onClose:
       if (form.comment) body.comment = form.comment;
       if (form.delayReason) { body.delayReason = form.delayReason; body.delayCategory = form.delayCategory ?? 'OTHER'; }
       if (form.reportDelay) body.reportDelay = true;
+      if (form.status === 'COMPLETED' && TEST_CODES.has(a.code)) { body.testOutcome = form.testOutcome ?? 'PASS'; if (form.evidenceRef) body.evidenceRef = form.evidenceRef; }
+      if (form.status === 'COMPLETED' && swRelease && form.installSw) body.softwareInstalled = { releaseId: swRelease, checksPassed: !!form.checksPassed };
       const r = await api(`/activities/${id}/execution`, { method: 'PATCH', body });
       const msg = r.milestoneChanges.length ? ` — ${r.milestoneChanges.length} milestone forecast(s) changed` : '';
       toast(`Saved. ${r.changedActivities} activities re-forecast${msg}`, 'ok');
       setForm((f: any) => ({ ...f, comment: '', delayReason: '', reportDelay: false, actualStart: undefined, actualFinish: undefined }));
     } catch (e: any) {
-      setErr(e.message);
+      if (e.code === 'SOFTWARE_NOT_INSTALLED' && e.details?.releaseId) setSwRelease(e.details.releaseId);
+      setErr(e.message + (e.details?.gates ? ` — ${e.details.gates.map((g: any) => g.title).join(', ')}` : ''));
     } finally { setBusy(false); }
   };
   const lock = async () => {
@@ -71,7 +78,10 @@ export function ActivityPanel({ id, onClose, unitLabel }: { id: number; onClose:
           <div className="kv"><span>Function</span><FnTag fn={a.function} /></div>
           <div className="kv"><span>Work center</span>{a.workCenter ?? 'Transport (route calendar)'}</div>
           <div className="kv"><span>Duration</span>{a.durationSlots / 2} {a.kind === 'transport' ? 'transport days' : 'working days'}</div>
-          <div className="kv"><span>Constrained by</span>{DRIVER_LABEL[a.driver?.type] ?? '—'}{a.capacityWaitSlots ? ` (${a.capacityWaitSlots / 2} wd queue)` : ''}</div>
+          <div className="kv"><span>Constrained by</span>{DRIVER_LABEL[a.driver?.type] ?? (a.driver?.type === 'gate' ? 'Readiness gate' : a.driver?.type === 'hold' ? 'Resource still held' : '—')}{a.capacityWaitSlots ? ` (${a.capacityWaitSlots / 2} wd queue)` : ''}</div>
+          <div className="kv"><span>Scope / confidence</span>{a.scope?.toLowerCase()} <ConfBadge c={a.confidence} /></div>
+          {a.phases?.length > 0 && <div className="kv"><span>Resource phases</span><span className="small">{a.phases.map((ph: any, i: number) => <div key={i}>{ph.name}: {ph.slots / 2} d</div>)}</span></div>}
+          {a.deadlineAt && <div className="kv"><span>Precise cut-off</span>{fmtTs(a.deadlineAt)}</div>}
           {a.weekendWork && <div className="kv"><span>Weekend work</span>authorized exception used</div>}
           <table className="grid tight dates">
             <thead><tr><th></th><th>Start</th><th>Finish</th></tr></thead>
@@ -79,6 +89,11 @@ export function ActivityPanel({ id, onClose, unitLabel }: { id: number; onClose:
           </table>
           {a.delayed && <div className="alert warn">Forecast finish is {a.delaySlots / 2} working days later than approved.{a.lastEvent?.reason ? <> Cause: <b>{a.lastEvent.reason}</b>{a.lastEvent.activity && a.lastEvent.activityId !== a.id ? <> (origin: {a.lastEvent.project} {a.lastEvent.unit} · {a.lastEvent.activity})</> : null}</> : null}</div>}
           {a.rescheduled && <div className="alert info">Approved schedule differs from baseline (approved rescheduling).</div>}
+          <h4>Readiness</h4>
+          <ul className="plain">{(a.gates ?? []).map((g: any) => (
+            <li key={g.id} className="small"><GateStatus s={g.status} /> {g.title} <span className="muted">· {DIM_LABEL[g.dimension] ?? g.dimension} · {g.blocks === 'COMPLETE' ? 'before completion' : 'before start'}{g.owner ? ` · ${g.owner}` : ''}{g.forecastLabel ? ` · ${g.forecastLabel}` : ''}{g.awaitingPlan ? ' · via planned work' : ''}{g.conditional ? ' · conditionally released' : ''}</span>
+              {g.notes && <div className="muted">{g.notes}</div>}</li>
+          ))}{!(a.gates ?? []).length && <li className="muted">No readiness gates.</li>}</ul>
           <h4>Predecessors</h4>
           <ul className="plain">{data.predecessors.map((p: any) => <li key={p.id}>{p.name} — <StatusBadge status={p.status} /> {finishLabel(p.forecast_finish)}</li>)}{!data.predecessors.length && <li className="muted">none</li>}</ul>
           {can('activity.lock') && <button className="secondary small" onClick={lock}>{a.locked ? 'Unlock commitment' : 'Lock commitment'}</button>}
@@ -107,6 +122,20 @@ export function ActivityPanel({ id, onClose, unitLabel }: { id: number; onClose:
                   <span className="hint">Current forecast: {finishLabel(a.forecastFinish)} · approved: {finishLabel(a.approvedFinish)}</span>
                 </label>
               )}
+              {form.status === 'COMPLETED' && TEST_CODES.has(a.code) && (
+                <div className="delay-box">
+                  <label className="field">Test outcome <span className="req">required</span>
+                    <select value={form.testOutcome ?? 'PASS'} onChange={(e) => set('testOutcome', e.target.value)}><option value="PASS">Pass</option><option value="FAIL">Fail (opens a quality hold)</option><option value="INCONCLUSIVE">Inconclusive</option></select></label>
+                  <label className="field">Evidence / report <input value={form.evidenceRef ?? ''} onChange={(e) => set('evidenceRef', e.target.value)} /></label>
+                  <span className="hint">Testing performed is not "passed and released": release is a separate quality decision.</span>
+                </div>
+              )}
+              {form.status === 'COMPLETED' && swRelease && (
+                <div className="delay-box">
+                  <label className="check"><input type="checkbox" checked={!!form.installSw} onChange={(e) => set('installSw', e.target.checked)} /> Record installation of the required release (#{swRelease}) on this unit</label>
+                  <label className="check"><input type="checkbox" checked={!!form.checksPassed} onChange={(e) => set('checksPassed', e.target.checked)} /> Post-installation checks passed</label>
+                </div>
+              )}
               {form.status === 'BLOCKED' && <label className="field">Blocker <span className="req">required</span><input value={form.blocker} onChange={(e) => set('blocker', e.target.value)} /></label>}
               <label className="check"><input type="checkbox" checked={!!form.reportDelay} onChange={(e) => set('reportDelay', e.target.checked)} /> Report this task as delayed</label>
               {delayTriggered && (
@@ -132,7 +161,9 @@ export function ActivityPanel({ id, onClose, unitLabel }: { id: number; onClose:
               <h4>Reschedule (Program)</h4>
               <label className="field">New start <SlotInput value={move ?? a.forecastStart} onChange={setMove} /></label>
               <label className="check"><input type="checkbox" checked={pullIn} onChange={(e) => setPullIn(e.target.checked)} /> Let successors follow an earlier move</label>
-              <div className="actions"><button className="secondary" disabled={move === null || move === a.forecastStart} onClick={() => setMoveFlow(true)}>Simulate move…</button></div>
+              <div className="actions">
+                <button className="secondary" disabled={move === null || move === a.forecastStart} onClick={() => { addToBasket({ label: `Move ${unitLabel ?? ''} ${a.code} → ${slotLabel(move!)}`, op: { type: 'move_activity', activityId: a.id, start: move, pullInSuccessors: pullIn } }); toast('Added to the daily-call change basket', 'ok'); }}>Add to call basket</button>
+                <button className="secondary" disabled={move === null || move === a.forecastStart} onClick={() => setMoveFlow(true)}>Simulate move…</button></div>
             </div>
           )}
         </div>

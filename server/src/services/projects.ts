@@ -2,12 +2,16 @@ import type pg from 'pg';
 import { z } from 'zod';
 import type { Db } from '../db/pool.js';
 import { dayToIso } from '../engine/calendar.js';
-import { freezeStatus, generateActivities, type RoutingStepDef } from '../engine/generate.js';
+import { freezeStatus, type FreezePolicy } from '../engine/generate.js';
 import { initialPlan } from '../engine/scheduler.js';
 import { audit, getSetting, HttpError, requirePermission, todayDay, type AuthUser } from './common.js';
+import { syncDerivedGates } from './gates.js';
+import { createUnit, syncProjectGraph } from './graph.js';
+import { bomRequirementsForUnit } from './materials.js';
 import { recalculate } from './recalc.js';
 import { loadPlanState } from './state.js';
 
+const composition = z.array(z.object({ productTypeId: z.number().int(), quantity: z.number().int().min(0).max(200) }));
 export const createProjectSchema = z.object({
   code: z.string().min(2).max(40),
   name: z.string().min(2),
@@ -16,135 +20,193 @@ export const createProjectSchema = z.object({
   country: z.string().length(2),
   calendarId: z.number().int().nullable().optional(),
   routeId: z.number().int(),
-  requiredDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  serviceProfileId: z.number().int().nullable().optional(),
+  requiredDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  demandStatus: z.enum(['TENTATIVE', 'APPROVED', 'COMMITTED']).optional(),
   notes: z.string().optional(),
-  lines: z.array(z.object({ productTypeId: z.number().int(), quantity: z.number().int().min(1).max(200) })).min(1),
+  lines: composition.optional(),
+  systems: z.array(z.object({ code: z.string().optional(), composition })).optional(),
+  loose: composition.optional(),
+  deliveries: z.array(z.object({ systems: z.array(z.number().int()), serviceProfileId: z.number().int().nullable().optional() })).optional(),
+  priority: z.number().int().optional(),
+  meta: z.record(z.string(), z.any()).optional(),
 });
+export type CreateProjectInput = z.infer<typeof createProjectSchema>;
 
-export async function routingFor(db: Db, productTypeId: number): Promise<(RoutingStepDef & { id: number })[]> {
-  const r = await db.query('SELECT * FROM routing_steps WHERE product_type_id = $1 ORDER BY seq', [productTypeId]);
-  if (!r.rows.length) throw new HttpError(400, `Product type ${productTypeId} has no routing configured`);
-  return r.rows.map((s) => ({
-    id: s.id, seq: s.seq, code: s.code, name: s.name, function: s.function, workCenterId: s.work_center_id,
-    durationSlots: s.duration_slots, scope: s.scope, kind: s.kind, predecessorSeqs: s.predecessor_seqs,
-    milestoneTag: s.milestone_tag, useDestinationCalendar: s.use_destination_calendar,
-  }));
+/** Default system composition from order lines: one system per cabinet, outlets distributed evenly. */
+export async function systemsFromLines(db: Db, lines: { productTypeId: number; quantity: number }[]) {
+  const pts = new Map((await db.query('SELECT id, family FROM product_types')).rows.map((p) => [p.id, p.family]));
+  const cabinets = lines.filter((l) => pts.get(l.productTypeId) === 'POWER_CABINET');
+  const outlets = lines.filter((l) => pts.get(l.productTypeId) !== 'POWER_CABINET');
+  const nCab = cabinets.reduce((s, l) => s + l.quantity, 0);
+  if (!nCab) return { systems: [] as { code: string; composition: { productTypeId: number; quantity: number }[] }[], loose: lines };
+  const systems: { code: string; composition: { productTypeId: number; quantity: number }[] }[] = [];
+  const cabList = cabinets.flatMap((l) => Array(l.quantity).fill(l.productTypeId));
+  for (let i = 0; i < nCab; i++) systems.push({ code: `SYS-${i + 1}`, composition: [{ productTypeId: cabList[i], quantity: 1 }] });
+  for (const l of outlets) {
+    for (let k = 0; k < l.quantity; k++) {
+      const s = systems[k % nCab];
+      const e = s.composition.find((x) => x.productTypeId === l.productTypeId);
+      if (e) e.quantity++; else s.composition.push({ productTypeId: l.productTypeId, quantity: 1 });
+    }
+  }
+  return { systems, loose: [] as { productTypeId: number; quantity: number }[] };
 }
 
+const DEFAULT_DOCS = ['Commercial invoice', 'Packing list', 'Delivery note'];
+
 /**
- * Create a customer project, expand it into per-unit activity flows and generate its initial
- * plan backward from the required commissioning date (Mode A). The accepted plan becomes the
- * committed baseline.
+ * Create a customer project: versioned configuration, complete systems, individually identified
+ * units, shipment manifest(s) and commissioning visit(s); then plan it (Mode A for committed demand,
+ * indicative forward plan for tentative/approved demand that must not displace committed work).
  */
-export async function createProject(c: pg.PoolClient, user: AuthUser, input: z.infer<typeof createProjectSchema>) {
+export async function createProject(c: pg.PoolClient, user: AuthUser, input: CreateProjectInput, opts: { skipPlan?: boolean; source?: string } = {}) {
   await requirePermission(c, user, 'project.create');
   const route = (await c.query('SELECT * FROM routes WHERE id = $1', [input.routeId])).rows[0];
   if (!route) throw new HttpError(400, 'Unknown route');
-  const prio = (await c.query(`SELECT COALESCE(MAX(priority), 0) + 1 AS p FROM projects WHERE status = 'ACTIVE'`)).rows[0].p;
+  const demand = input.demandStatus ?? 'COMMITTED';
+  if (demand === 'COMMITTED' && !input.requiredDate) throw new HttpError(422, 'Committed demand needs a required commissioning date');
+  const prio = input.priority ?? (await c.query(`SELECT COALESCE(MAX(priority), 0) + 1 AS p FROM projects WHERE status = 'ACTIVE'`)).rows[0].p;
   const calendarId = input.calendarId ?? (await c.query('SELECT id FROM calendars WHERE country = $1 ORDER BY id LIMIT 1', [input.country])).rows[0]?.id ?? null;
+  const profile = input.serviceProfileId ?? (await c.query('SELECT id FROM service_profiles WHERE route_id = $1 ORDER BY service_level = \'STANDARD\' DESC, id LIMIT 1', [route.id])).rows[0]?.id ?? null;
+  const meta = input.meta ?? {};
   const p = (await c.query(
-    `INSERT INTO projects (code, name, customer_id, site_location, country, calendar_id, route_id, required_commissioning_date, priority, notes, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-    [input.code, input.name, input.customerId, input.siteLocation, input.country, calendarId, input.routeId, input.requiredDate, prio, input.notes ?? null, user.id],
+    `INSERT INTO projects (code, name, customer_id, site_location, country, calendar_id, route_id, service_profile_id, required_commissioning_date, priority, demand_status, notes, created_by,
+       required_commissioning_text, required_exw_text, wave, series, sap_order_ref, o2c_owner, spoc, rationale, customer_situation, mitigations, source, source_ref)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25) RETURNING *`,
+    [input.code, input.name, input.customerId, input.siteLocation, input.country, calendarId, input.routeId, profile, input.requiredDate ?? null, prio, demand, input.notes ?? null, user.id,
+      meta.requiredCommissioningText ?? null, meta.requiredExwText ?? null, meta.wave ?? null, meta.series ?? null, meta.sapOrderRef ?? null, meta.o2cOwner ?? null, meta.spoc ?? null,
+      meta.rationale ?? null, meta.customerSituation ?? null, meta.mitigations ?? null, opts.source ?? 'MANUAL', meta.sourceRef ?? null],
   )).rows[0];
-  const sh = (await c.query('INSERT INTO shipments (project_id, code, route_id) VALUES ($1,$2,$3) RETURNING id', [p.id, `${input.code}-SH1`, input.routeId])).rows[0];
 
-  const units: { key: string; seq: number; shipmentKey: string; steps: RoutingStepDef[]; dbId: number }[] = [];
-  const stepIds = new Map<string, number>();
+  let systems = input.systems?.map((s, i) => ({ code: s.code ?? `SYS-${i + 1}`, composition: s.composition.filter((x) => x.quantity > 0) }));
+  let loose = input.loose ?? [];
+  if (!systems) ({ systems, loose } = await systemsFromLines(c, input.lines ?? []));
+  const deliveries = input.deliveries?.length ? input.deliveries : [{ systems: systems.map((_, i) => i), serviceProfileId: null }];
+
+  await c.query(`INSERT INTO project_configurations (project_id, version, status, source, systems, loose, scope_text, created_by, approved_by, approved_at, applied_at)
+    VALUES ($1, 1, 'APPLIED', $2, $3, $4, $5, $6, $6, now(), now())`, [p.id, opts.source ?? 'MANUAL', JSON.stringify(systems), JSON.stringify(loose), meta.scopeText ?? null, user.id]);
+  const totals = new Map<number, number>();
+  for (const s of systems) for (const x of s.composition) totals.set(x.productTypeId, (totals.get(x.productTypeId) ?? 0) + x.quantity);
+  for (const x of loose) totals.set(x.productTypeId, (totals.get(x.productTypeId) ?? 0) + x.quantity);
+  const lineOf = new Map<number, number>();
+  let ln = 0;
+  for (const [pt, q] of totals) lineOf.set(pt, (await c.query('INSERT INTO order_lines (project_id, line_no, product_type_id, quantity) VALUES ($1,$2,$3,$4) RETURNING id', [p.id, ++ln, pt, q])).rows[0].id);
+
+  const team = (await c.query(`SELECT w.id FROM work_centers w WHERE w.code = (SELECT CASE WHEN rg.code = 'NA' THEN 'COMM_NA' ELSE 'COMM_EU' END FROM routes r LEFT JOIN regions rg ON rg.id = r.region_id WHERE r.id = $1)`, [route.id])).rows[0]?.id ?? null;
+  const shipIds: number[] = []; const visitIds: number[] = [];
+  for (const [i, d] of deliveries.entries()) {
+    const sp = d.serviceProfileId ?? profile;
+    const customs = sp ? (await c.query('SELECT customs_days FROM service_profiles WHERE id = $1', [sp])).rows[0]?.customs_days : 0;
+    const sh = (await c.query(`INSERT INTO shipments (project_id, code, seq, route_id, service_profile_id, destination) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+      [p.id, `${input.code}-SH${i + 1}`, i + 1, route.id, sp, input.siteLocation])).rows[0].id;
+    for (const doc of [...DEFAULT_DOCS, ...(customs > 0 ? ['Customs declaration'] : [])]) await c.query('INSERT INTO shipment_documents (shipment_id, doc_type) VALUES ($1,$2)', [sh, doc]);
+    shipIds.push(sh);
+    visitIds.push((await c.query(`INSERT INTO commissioning_visits (project_id, code, site, installation_responsibility, team_resource_id) VALUES ($1,$2,$3,'Customer / installation partner',$4) RETURNING id`,
+      [p.id, `${input.code}-V${i + 1}`, input.siteLocation, team])).rows[0].id);
+  }
   let seq = 0;
-  for (const [i, line] of input.lines.entries()) {
-    const pt = (await c.query('SELECT * FROM product_types WHERE id = $1', [line.productTypeId])).rows[0];
-    if (!pt) throw new HttpError(400, `Unknown product type ${line.productTypeId}`);
-    const steps = await routingFor(c, line.productTypeId);
-    const ol = (await c.query('INSERT INTO order_lines (project_id, line_no, product_type_id, quantity) VALUES ($1,$2,$3,$4) RETURNING id',
-      [p.id, i + 1, line.productTypeId, line.quantity])).rows[0];
-    for (let q = 1; q <= line.quantity; q++) {
-      seq++;
-      const serial = `${pt.code}-${String(q).padStart(3, '0')}`;
-      const u = (await c.query('INSERT INTO units (project_id, order_line_id, shipment_id, serial, seq) VALUES ($1,$2,$3,$4,$5) RETURNING id',
-        [p.id, ol.id, sh.id, serial, seq])).rows[0];
-      units.push({ key: String(u.id), seq, shipmentKey: String(sh.id), steps, dbId: u.id });
-      for (const st of steps) stepIds.set(`${u.id}:${st.seq}`, st.id);
+  const unitIds: number[] = [];
+  const pt = new Map((await c.query('SELECT id, code FROM product_types')).rows.map((x) => [x.id, x.code]));
+  for (const [si, s] of systems.entries()) {
+    const di = Math.max(0, deliveries.findIndex((d) => d.systems.includes(si)));
+    const comp = s.composition.map((x) => `${x.quantity}× ${pt.get(x.productTypeId)}`).join(' + ');
+    const sys = (await c.query('INSERT INTO systems (project_id, code, name, composition, visit_id) VALUES ($1,$2,$3,$4,$5) RETURNING id', [p.id, s.code, `${input.code} ${s.code}`, comp, visitIds[di]])).rows[0].id;
+    for (const x of s.composition) for (let k = 0; k < x.quantity; k++) {
+      const u = await createUnit(c, { projectId: p.id, productTypeId: x.productTypeId, systemId: sys, shipmentId: shipIds[di], orderLineId: lineOf.get(x.productTypeId), seq: ++seq, userId: user.id, source: opts.source ?? 'PLAN' });
+      unitIds.push(u.id);
     }
   }
-  const { acts, deps } = generateActivities(
-    units,
-    [{ key: String(sh.id), routeId: route.id, transportSlots: route.lead_time_days * 2, releaseLagSlots: route.release_lag_slots }],
-    calendarId,
-  );
-  const idOf = new Map<string, number>();
-  for (const g of acts) {
-    const routingStepId = g.unitKey ? stepIds.get(`${g.unitKey}:${g.step.seq}`) : [...stepIds.entries()].find(([k]) => k.endsWith(`:${g.step.seq}`))?.[1];
-    const r = await c.query(
-      `INSERT INTO activities (project_id, unit_id, shipment_id, routing_step_id, seq, unit_seq, code, name, function, work_center_id,
-         calendar_id, route_id, kind, milestone_tag, duration_slots)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
-      [p.id, g.unitKey ? Number(g.unitKey) : null, sh.id, routingStepId ?? null, g.step.seq, g.unitSeq, g.step.code,
-        g.step.name, g.step.function, g.step.workCenterId, g.calendarId, g.routeId, g.step.kind,
-        g.step.milestoneTag, g.durationSlots],
-    );
-    idOf.set(g.key, r.rows[0].id);
+  for (const x of loose) for (let k = 0; k < x.quantity; k++) {
+    const u = await createUnit(c, { projectId: p.id, productTypeId: x.productTypeId, shipmentId: shipIds[0], orderLineId: lineOf.get(x.productTypeId), seq: ++seq, userId: user.id, source: opts.source ?? 'PLAN' });
+    unitIds.push(u.id);
   }
-  for (const d of deps) {
-    await c.query('INSERT INTO dependencies (pred_id, succ_id, lag_slots) VALUES ($1,$2,$3)', [idOf.get(d.predKey), idOf.get(d.succKey), d.lag]);
-  }
-
-  const plan = await planInitial(c, user, p.id, 'Initial backward plan');
-  await audit(c, {
-    userId: user.id, action: 'project.create', changeClass: 'COMMERCIAL', entityType: 'project', entityId: p.id, projectId: p.id,
-    planVersion: plan.version, after: { ...input, priority: prio, feasible: plan.feasible },
-  });
+  await syncProjectGraph(c, p.id, 'Project created');
+  for (const id of unitIds) await bomRequirementsForUnit(c, id);
+  await syncDerivedGates(c, [p.id]);
+  if (opts.skipPlan) return { projectId: p.id, feasible: null, earliestCommissioning: null, version: null, confidence: null };
+  const plan = demand === 'COMMITTED' ? await planInitial(c, user, p.id, 'Initial backward plan') : await planIndicative(c, user, p.id);
+  await audit(c, { userId: user.id, action: 'project.create', changeClass: 'COMMERCIAL', entityType: 'project', entityId: p.id, projectId: p.id,
+    planVersion: plan.version, after: { ...input, priority: prio, feasible: plan.feasible, confidence: plan.confidence } });
   return { projectId: p.id, ...plan };
 }
 
-/** Mode A for an existing, not-yet-started project; commits the result as baseline. */
+/** Mode A for an existing, not-yet-started committed project; commits the result as baseline. */
 export async function planInitial(c: pg.PoolClient, user: AuthUser, projectId: number, summary: string) {
   const state = await loadPlanState(c);
   const plan = initialPlan(state, projectId);
-  const own = state.activities.filter((a) => a.projectId === projectId);
+  const own = state.activities.filter((a) => a.projectId === projectId && a.status !== 'COMPLETED');
   for (const a of own) a.approvedStart = plan.starts.get(a.id) ?? null;
   await c.query(`UPDATE activities a SET approved_start = v.s FROM (SELECT unnest($1::int[]) id, unnest($2::int[]) s) v WHERE a.id = v.id`,
     [own.map((a) => a.id), own.map((a) => a.approvedStart)]);
-  const comm = plan.result.milestones.find((m) => m.projectId === projectId && m.type === 'COMM' && m.shipmentId === null);
-  await c.query('UPDATE projects SET plan_status = $2, earliest_commissioning_slot = $3 WHERE id = $1',
-    [projectId, plan.feasible ? 'FEASIBLE' : 'INFEASIBLE', comm?.forecast ?? null]);
+  const comm = plan.result.milestones.find((m) => m.projectId === projectId && m.type === 'COMM' && m.shipmentId === null && !m.visitId);
+  await c.query('UPDATE projects SET plan_status = $2, earliest_commissioning_slot = $3, plan_confidence = $4 WHERE id = $1',
+    [projectId, plan.feasible ? 'FEASIBLE' : 'INFEASIBLE', comm?.forecast ?? null, plan.confidence]);
   const out = await recalculate(c, {
-    userId: user.id, kind: 'INITIAL_PLAN', summary: `${summary} (${plan.feasible ? 'feasible' : 'infeasible'})`, state,
-    approve: { activityIds: new Set(own.map((a) => a.id)), projectIds: new Set([projectId]), kind: 'BASELINE', reason: summary },
+    userId: user.id, kind: 'INITIAL_PLAN', summary: `${summary} (${plan.feasible ? 'feasible' : 'infeasible'}${plan.confidence !== 'FIRM' ? ', conditional' : ''})`, state,
+    approve: { activityIds: new Set(own.map((a) => a.id)), projectIds: new Set([projectId]), kind: 'BASELINE', reason: plan.confidence === 'FIRM' ? summary : `${summary} — conditional on unconfirmed readiness` },
   });
-  return { feasible: plan.feasible, earliestCommissioning: comm?.forecast ?? null, version: out.version };
+  return { feasible: plan.feasible, earliestCommissioning: comm?.forecast ?? null, version: out.version, confidence: plan.confidence };
 }
 
+/** Tentative / approved demand: indicative dates only, scheduled after committed work, no commitments. */
+export async function planIndicative(c: pg.PoolClient, user: AuthUser, projectId: number) {
+  await c.query(`UPDATE projects SET plan_status = 'INDICATIVE' WHERE id = $1`, [projectId]);
+  const out = await recalculate(c, { userId: user.id, kind: 'INDICATIVE_PLAN', summary: 'Indicative plan for uncommitted demand' });
+  const m = out.result.milestones.find((x) => x.projectId === projectId && x.type === 'COMM' && x.shipmentId === null && !x.visitId);
+  await c.query('UPDATE projects SET earliest_commissioning_slot = $2, plan_confidence = $3 WHERE id = $1', [projectId, m?.forecast ?? null, m?.confidence ?? 'FIRM']);
+  return { feasible: null, earliestCommissioning: m?.forecast ?? null, version: out.version, confidence: m?.confidence ?? 'FIRM' };
+}
+
+export interface ShipmentFreeze { shipmentId: number; code: string; frozen: boolean; freezeStartDate: string | null; exworksDate: string | null; frozenSince: string | null }
 export interface FreezeInfo {
   frozen: boolean;
   freezeStartDate: string | null;
   exworksDate: string | null;
+  shipments: ShipmentFreeze[];
+  policy: FreezePolicy;
 }
 
-/** Freeze evaluation always uses the persisted forecast ExWorks, never a simulated one. */
+export async function freezePolicy(db: Db): Promise<FreezePolicy> {
+  const legacy = await getSetting<number>(db, 'freeze_days', 21);
+  const p = await getSetting<Partial<FreezePolicy>>(db, 'freeze_policy', {});
+  return { days: p.days ?? legacy, inclusive: p.inclusive ?? true, persistent: p.persistent ?? true, scope: p.scope ?? 'SHIPMENT' };
+}
+
+/** Freeze evaluation always uses the persisted forecast ExWorks of each delivery, never a simulated one. */
 export async function freezeInfo(db: Db, projectIds?: number[]): Promise<Map<number, FreezeInfo>> {
-  const freezeDays = await getSetting<number>(db, 'freeze_days', 21);
+  const policy = await freezePolicy(db);
   const today = await todayDay(db);
   const r = await db.query(
-    `SELECT p.id, m.shipment_id, m.forecast_slot, m.actual_slot FROM projects p
-     LEFT JOIN milestones m ON m.project_id = p.id AND m.type = 'EXW'
-     WHERE p.status = 'ACTIVE' ${projectIds ? 'AND p.id = ANY($1)' : ''}`,
-    projectIds ? [projectIds] : [],
-  );
+    `SELECT p.id pid, s.id sid, s.code, s.frozen_since, m.forecast_slot, m.actual_slot FROM projects p
+     LEFT JOIN shipments s ON s.project_id = p.id
+     LEFT JOIN milestones m ON m.project_id = p.id AND m.type = 'EXW' AND m.shipment_id = s.id
+     WHERE p.status = 'ACTIVE' ${projectIds ? 'AND p.id = ANY($1)' : ''} ORDER BY p.id, s.seq`, projectIds ? [projectIds] : []);
   const out = new Map<number, FreezeInfo>();
-  const byProject = new Map<number, typeof r.rows>();
-  for (const row of r.rows) byProject.set(row.id, [...(byProject.get(row.id) ?? []), row]);
-  for (const [pid, rows] of byProject) {
-    // Relevant ExWorks: the earliest not-yet-shipped delivery (shipment level), else project level.
-    const ship = rows.filter((x) => x.shipment_id !== null && x.actual_slot === null && x.forecast_slot !== null);
-    const proj = rows.find((x) => x.shipment_id === null);
-    const rel = ship.length ? ship.reduce((a, b) => (a.forecast_slot <= b.forecast_slot ? a : b)) : proj;
-    const st = freezeStatus(rel?.forecast_slot ?? null, rel?.actual_slot ?? null, today, freezeDays);
-    out.set(pid, {
-      frozen: st.frozen,
-      freezeStartDate: st.freezeStartDay !== null ? dayToIso(st.freezeStartDay) : null,
-      exworksDate: st.exworksDay !== null ? dayToIso(st.exworksDay) : null,
-    });
+  for (const row of r.rows) {
+    const fi = out.get(row.pid) ?? { frozen: false, freezeStartDate: null, exworksDate: null, shipments: [], policy };
+    out.set(row.pid, fi);
+    if (!row.sid) continue;
+    const st = freezeStatus(row.forecast_slot ?? null, row.actual_slot ?? null, today, policy.days, policy.inclusive);
+    const frozen = row.actual_slot === null && row.forecast_slot !== null && (st.frozen || (policy.persistent && row.frozen_since !== null));
+    fi.shipments.push({ shipmentId: row.sid, code: row.code, frozen, freezeStartDate: st.freezeStartDay !== null ? dayToIso(st.freezeStartDay) : null,
+      exworksDate: st.exworksDay !== null ? dayToIso(st.exworksDay) : null, frozenSince: row.frozen_since });
+  }
+  for (const fi of out.values()) {
+    const open = fi.shipments.filter((s) => s.exworksDate);
+    const first = open.reduce<ShipmentFreeze | null>((m, s) => (!m || (s.exworksDate! < m.exworksDate!) ? s : m), null);
+    fi.frozen = fi.shipments.some((s) => s.frozen);
+    fi.freezeStartDate = first?.freezeStartDate ?? null;
+    fi.exworksDate = first?.exworksDate ?? null;
+    if (policy.scope === 'PROJECT' && fi.frozen) for (const s of fi.shipments) s.frozen = s.exworksDate !== null;
   }
   return out;
+}
+
+/** Persist the moment a delivery first enters the freeze (persistent freezing). */
+export async function persistFreeze(c: pg.PoolClient) {
+  const info = await freezeInfo(c);
+  for (const fi of info.values()) for (const s of fi.shipments) {
+    if (s.frozen && !s.frozenSince) await c.query('UPDATE shipments SET frozen_since = CURRENT_DATE WHERE id = $1 AND frozen_since IS NULL', [s.shipmentId]);
+  }
 }

@@ -7,6 +7,10 @@ import { AuditView } from './pages/AuditView';
 import { CapacityView } from './pages/CapacityView';
 import { DailyControl } from './pages/DailyControl';
 import { GanttView } from './pages/GanttView';
+import { ImportView } from './pages/ImportView';
+import { OutboundView } from './pages/OutboundView';
+import { ReadinessView } from './pages/ReadinessView';
+import { SupplyQualityView } from './pages/SupplyQualityView';
 import { Login } from './pages/Login';
 import { PriorityView } from './pages/PriorityView';
 import { ProjectDetails } from './pages/ProjectDetails';
@@ -26,10 +30,14 @@ function Shell() {
           <NavLink to="/daily">Daily Control</NavLink>
           <NavLink to="/priority">Priority</NavLink>
           <NavLink to="/gantt">Gantt</NavLink>
-          <NavLink to="/capacity">Program & Capacity</NavLink>
+          <NavLink to="/readiness">Readiness</NavLink>
+          <NavLink to="/outbound">Outbound</NavLink>
+          <NavLink to="/supply">Materials · SW · Quality</NavLink>
+          <NavLink to="/capacity">Capacity</NavLink>
           <NavLink to="/scenarios">Scenarios</NavLink>
           <NavLink to="/assistant">AI Assistant</NavLink>
           <NavLink to="/audit">Audit</NavLink>
+          {can('import.apply') && <NavLink to="/import">Import</NavLink>}
           {can('admin.config') && <NavLink to="/admin">Admin</NavLink>}
         </nav>
         <div className="spacer" />
@@ -44,6 +52,10 @@ function Shell() {
           <Route path="/gantt" element={<GanttView />} />
           <Route path="/projects/:id" element={<ProjectDetails />} />
           <Route path="/capacity" element={<CapacityView />} />
+          <Route path="/readiness" element={<ReadinessView />} />
+          <Route path="/outbound" element={<OutboundView />} />
+          <Route path="/supply" element={<SupplyQualityView />} />
+          <Route path="/import" element={<ImportView />} />
           <Route path="/scenarios" element={<ScenariosView />} />
           <Route path="/assistant" element={<Assistant />} />
           <Route path="/audit" element={<AuditView />} />

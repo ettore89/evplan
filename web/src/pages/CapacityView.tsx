@@ -5,8 +5,9 @@ import { useApp, useLive } from '../store';
 import { fmtDay, isoToDay } from '../time';
 
 export function CapacityView() {
-  const { can } = useApp();
-  const { data } = useLive<any>('/capacity');
+  const { can, toast } = useApp();
+  const { data, reload } = useLive<any>('/capacity');
+  const [proposal, setProposal] = useState<any>(null);
   const [whatIf, setWhatIf] = useState<{ workCenterId: number; capacity: number } | null>(null);
   const [preview, setPreview] = useState<any>(null);
   const [recovery, setRecovery] = useState<any>(null);
@@ -32,25 +33,56 @@ export function CapacityView() {
       </div>
       <h3>Work centers & bottlenecks</h3>
       <table className="grid tight">
-        <thead><tr><th>Work center</th><th>Capacity</th><th>Model</th><th>Avg duration</th><th>Throughput (systems/day)</th><th>Must feed</th><th>Capacity needed to feed it</th><th>Queueing in plan</th><th>Load next 20 wd</th><th></th></tr></thead>
+        <thead><tr><th>Resource</th><th>Capacity</th><th>Type</th><th>Avg duration</th><th>Throughput (systems/day)</th><th>Must feed</th><th>Capacity needed to feed it</th><th>Queueing in plan</th><th>Load next 20 wd</th><th></th></tr></thead>
         <tbody>{data.bottlenecks.map((b: any) => {
           const w = data.workCenters.find((x: any) => x.id === b.workCenterId);
           return (
             <tr key={b.workCenterId} className={b.isProgramBottleneck ? 'row-late' : b.starvesDownstream ? 'row-warn' : ''}>
               <td><b>{b.name}</b>{b.isProgramBottleneck && <span className="tag-red small"> program bottleneck</span>}{b.starvesDownstream && <span className="tag-amber small"> starves {b.downstreamCode}</span>}</td>
-              <td>{b.capacity}{w.capacityModel === 'effective' ? ` eff. (max ${w.maxConcurrent} concurrent, min rate ${w.minRate})` : ` parallel`}</td>
-              <td className="small">{w.capacityModel === 'effective' ? <span title={w.notes}>effective-units approximation ⓘ</span> : 'discrete'}</td>
+              <td>{b.capacity}{w.provisional && <span className="tag-amber small" title={w.notes}> provisional</span>}</td>
+              <td className="small" title={w.notes}>{(w.type ?? '').toLowerCase()} ⓘ</td>
               <td>{b.avgDurationDays} d</td><td><b>{b.throughputPerDay}</b></td>
               <td className="small">{b.downstreamCode ? `${b.downstreamCode} (${b.downstreamThroughput}/d)` : '—'}</td>
               <td>{b.requiredCapacityToFeedDownstream ?? '—'}{b.additionalCapacityNeeded > 0 && <span className="var var-late"> +{b.additionalCapacityNeeded}</span>}</td>
               <td>{b.capacityWaitDays ? `${b.capacityWaitDays} wd (${b.delayedActivities} acts)` : '—'}</td>
               <td><div className="progress"><div style={{ width: `${Math.min(100, b.utilizationNext20d * 100)}%`, background: b.utilizationNext20d > 0.95 ? '#d64545' : undefined }} /></div>{Math.round(b.utilizationNext20d * 100)}%</td>
-              <td><button className="secondary small" onClick={() => runWhatIf(b.workCenterId, b.capacity + (w.capacityModel === 'effective' ? 0.5 : 1))}>What if +{w.capacityModel === 'effective' ? 0.5 : 1}?</button></td>
+              <td><button className="secondary small" onClick={() => runWhatIf(b.workCenterId, b.capacity + 1)}>What if +1?</button></td>
             </tr>
           );
         })}</tbody>
       </table>
       <p className="hint">Upstream capacity is not unlimited: each work center is compared with the work center it must feed (its configured sizing target, e.g. subassembly test → Final Assembly, otherwise the slowest downstream work center). Capacity is never increased automatically — changes require an authorized scenario.</p>
+
+      {data.assumptions?.eol && (
+        <div className="alert warn small"><b>EOL resource profile: {String(data.assumptions.eol.status).toLowerCase()}</b> — {data.assumptions.eol.note}</div>
+      )}
+      {data.assumptions?.validation?.status === 'TO_CONFIRM' && <div className="alert info small"><b>Open assumption:</b> {data.assumptions.validation.note}</div>}
+      {data.assumptions?.precommissioning?.status === 'TO_CONFIRM' && <div className="alert info small"><b>Open assumption:</b> {data.assumptions.precommissioning.note}</div>}
+      <div className="cards">
+        <div className="card wide">
+          <h4>Capacity timeline (effective-dated)</h4>
+          <p className="hint">Proposed → approved → implemented → verified. Only implemented (or verified) capacity feeds the executable plan; proposed and approved improvements are simulated as scenarios.</p>
+          <table className="grid tight"><thead><tr><th>Resource</th><th>From</th><th>Capacity</th><th>Status</th><th>Reason</th><th>By</th><th /></tr></thead>
+            <tbody>{data.capacityChanges.map((c: any) => (
+              <tr key={c.id} className={c.status === 'REJECTED' ? 'dim' : ''}><td>{c.work_center}</td><td>{String(c.effective_from).slice(0, 10)}</td><td>{c.capacity}</td><td><span className={`gs gs-${c.status === 'VERIFIED' || c.status === 'IMPLEMENTED' ? 'READY' : c.status === 'REJECTED' ? 'BLOCKED' : 'PENDING'}`}>{c.status.toLowerCase()}</span></td>
+                <td className="small wrap">{c.reason}</td><td className="small">{c.created_by_name}</td>
+                <td className="nowrap">{can('scenario.op.capacity') && ({ PROPOSED: 'APPROVED', APPROVED: 'IMPLEMENTED', IMPLEMENTED: 'VERIFIED' } as any)[c.status] && (
+                  <button className="small secondary" onClick={async () => {
+                    const next = ({ PROPOSED: 'APPROVED', APPROVED: 'IMPLEMENTED', IMPLEMENTED: 'VERIFIED' } as any)[c.status];
+                    const note = prompt(`Mark as ${next.toLowerCase()} — note / evidence:`);
+                    if (!note) return;
+                    try { await api(`/capacity-changes/${c.id}`, { method: 'PATCH', body: { status: next, note } }); toast(`Capacity change ${next.toLowerCase()}`, 'ok'); reload(); } catch (e: any) { toast(e.message, 'err'); }
+                  }}>→ {({ PROPOSED: 'approve', APPROVED: 'implemented', IMPLEMENTED: 'verified' } as any)[c.status]}</button>)}</td></tr>
+            ))}{!data.capacityChanges.length && <tr><td colSpan={7} className="muted">No dated capacity changes.</td></tr>}</tbody></table>
+          {can('scenario.op.capacity') && <button className="secondary small" onClick={() => setProposal({ workCenterId: data.workCenters[0]?.id, effectiveFrom: '', capacity: '', reason: '' })}>+ Propose a dated capacity change</button>}
+        </div>
+        <div className="card">
+          <h4>Non-production occupancy</h4>
+          <p className="hint">Troubleshooting, regression, test development, setup and removal reserve real resources (skids, shared supply, crews).</p>
+          {data.reservations.map((r: any) => <div key={r.id} className="small"><b>{r.work_center}</b> {r.kind.toLowerCase()} · {r.startLabel} → {r.finishLabel} · {Number(r.units)} unit(s)<div className="muted">{r.reason}</div></div>)}
+          {!data.reservations.length && <div className="muted small">None.</div>}
+        </div>
+      </div>
 
       <h3>Utilization heat map (next 6 weeks)</h3>
       <div className="heat-wrap">
@@ -94,6 +126,17 @@ export function CapacityView() {
       {data.overloads.length > 0 && (
         <><h3>Overloads (never hidden)</h3>
           <table className="grid tight"><tbody>{data.overloads.slice(0, 40).map((o: any, i: number) => <tr key={i} className="row-late"><td>{wcName(o.workCenterId)}</td><td>{o.slotLabel}</td><td>{o.load} / {o.capacity}</td><td>{o.activities.length} activities</td></tr>)}</tbody></table></>
+      )}
+      {proposal && (
+        <Modal title="Propose a dated capacity change" onClose={() => setProposal(null)}>
+          <label className="field">Resource <select value={proposal.workCenterId} onChange={(e) => setProposal({ ...proposal, workCenterId: Number(e.target.value) })}>{data.workCenters.map((w: any) => <option key={w.id} value={w.id}>{w.name} ({w.capacity})</option>)}</select></label>
+          <label className="field">Effective from <input type="date" value={proposal.effectiveFrom} onChange={(e) => setProposal({ ...proposal, effectiveFrom: e.target.value })} /></label>
+          <label className="field">New capacity <input type="number" step="0.5" value={proposal.capacity} onChange={(e) => setProposal({ ...proposal, capacity: e.target.value })} /></label>
+          <label className="field">Reason <span className="req">required</span><textarea rows={2} value={proposal.reason} onChange={(e) => setProposal({ ...proposal, reason: e.target.value })} /></label>
+          <div className="actions"><button disabled={!proposal.effectiveFrom || !proposal.capacity || proposal.reason.length < 3} onClick={async () => {
+            try { await api('/capacity-changes', { body: { workCenterId: proposal.workCenterId, effectiveFrom: proposal.effectiveFrom, capacity: Number(proposal.capacity), reason: proposal.reason } }); toast('Proposed — it affects the executable plan only once implemented', 'ok'); setProposal(null); reload(); } catch (e: any) { toast(e.message, 'err'); }
+          }}>Propose</button></div>
+        </Modal>
       )}
       {whatIf && (
         <Modal wide title={`What if ${wcName(whatIf.workCenterId)} capacity = ${whatIf.capacity}?`} onClose={() => { setWhatIf(null); setCommit(false); }}>

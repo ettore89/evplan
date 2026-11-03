@@ -1,5 +1,6 @@
 import { CalendarSet, dayOf, type Slot } from './calendar.js';
 import type { ActResult, ActivityDef, PlanState, ScheduleResult, WorkCenterDef } from './types.js';
+import { phasesOf } from './scheduler.js';
 
 export type ChangeKind = 'root' | 'propagated' | 'capacity' | 'improvement';
 
@@ -107,7 +108,7 @@ export function dailyUtilization(state: PlanState, result: ScheduleResult, fromD
         peak = Math.max(peak, l);
         const slotCap = result.ledger.capacityAt(w.id, s);
         if (baseWorking || l > 0) cap += slotCap;
-        if (l > slotCap + 1e-6 || (c?.acts.length ?? 0) > w.maxConcurrent) overloaded = true;
+        if (l > slotCap + 1e-6) overloaded = true;
       }
       rows.push({ workCenterId: w.id, day: d, load: round2(load), capacity: round2(cap), peak: round2(peak), overloaded });
     }
@@ -121,57 +122,65 @@ export interface BottleneckRow {
   name: string;
   capacity: number;
   avgDurationDays: number;
-  throughputPerDay: number; // systems / working day at nominal capacity
+  /** Operations per working day at nominal capacity. */
+  opsPerDay: number;
+  /** Physical units per working day (system operations count every unit of the system). */
+  throughputPerDay: number;
+  scope: string;
   downstreamCode: string | null;
   downstreamThroughput: number | null;
   requiredCapacityToFeedDownstream: number | null;
   additionalCapacityNeeded: number;
   isProgramBottleneck: boolean;
   starvesDownstream: boolean;
-  capacityWaitDays: number; // total queueing caused in the current plan
+  capacityWaitDays: number;
   delayedActivities: number;
   utilizationNext20d: number;
 }
 
 /**
- * Nominal throughput per work center from the routing mix in the plan, comparison of each
- * work center with the one that immediately follows it in the routing, and capacity queueing
- * observed in the actual schedule.
+ * Nominal throughput per resource from the phase profiles in the plan, compared with the resource it
+ * must feed (configured sizing target, else the slowest downstream resource), plus queueing observed.
  */
 export function bottleneckAnalysis(
   state: PlanState, result: ScheduleResult, routeOrder: number[], sizingTargets: Map<number, number | null> = new Map(),
 ): BottleneckRow[] {
-  const byWc = new Map<number, ActivityDef[]>();
-  for (const a of state.activities) {
-    if (!a.workCenterId || a.kind !== 'work' || a.status === 'CANCELLED') continue;
-    let l = byWc.get(a.workCenterId);
-    if (!l) byWc.set(a.workCenterId, (l = []));
-    l.push(a);
+  const unitsPerSystem = new Map<number, Set<number>>();
+  for (const a of state.activities) if (a.scope === 'UNIT' && a.systemId && a.unitId) {
+    const st = unitsPerSystem.get(a.systemId) ?? new Set();
+    st.add(a.unitId);
+    unitsPerSystem.set(a.systemId, st);
   }
-  const wcs = routeOrder.map((id) => state.workCenters.find((w) => w.id === id)).filter((w): w is WorkCenterDef => !!w);
-  const tp = (w: WorkCenterDef) => {
-    const list = byWc.get(w.id) ?? [];
-    const avgSlots = list.length ? list.reduce((s, a) => s + a.durationSlots, 0) / list.length : 1;
-    return { avgDays: avgSlots / 2, throughput: (w.capacity * 2) / avgSlots };
-  };
-  const stats = wcs.map((w) => ({ w, ...tp(w) }));
+  const demand = new Map<number, { slots: number; units: number; ops: number; scopes: Set<string>; acts: ActivityDef[] }>();
+  for (const a of state.activities) {
+    if (a.kind !== 'work' || a.status === 'CANCELLED') continue;
+    const per = new Map<number, number>();
+    for (const ph of phasesOf(a)) for (const r of ph.resources) per.set(r.resourceId, (per.get(r.resourceId) ?? 0) + ph.slots * r.units);
+    const unitsServed = a.scope === 'SYSTEM' || (a.scope === 'SITE' && a.systemId) ? unitsPerSystem.get(a.systemId ?? -1)?.size ?? 1 : 1;
+    for (const [wc, sl] of per) {
+      const d = demand.get(wc) ?? { slots: 0, units: 0, ops: 0, scopes: new Set<string>(), acts: [] };
+      d.slots += sl; d.units += unitsServed; d.ops++; d.scopes.add(a.scope ?? 'UNIT'); d.acts.push(a);
+      demand.set(wc, d);
+    }
+  }
+  const wcs = routeOrder.map((id) => state.workCenters.find((w) => w.id === id)).filter((w): w is WorkCenterDef => !!w && demand.has(w.id));
+  const stats = wcs.map((w) => {
+    const d = demand.get(w.id)!;
+    const avgSlots = d.slots / d.ops;
+    const opsPerDay = (w.capacity * 2) / avgSlots;
+    return { w, avgDays: avgSlots / 2, opsPerDay, throughput: opsPerDay * (d.units / d.ops), scope: [...d.scopes].join('/'), d };
+  });
   const minTp = Math.min(...stats.map((s) => s.throughput));
   const now = state.now;
   return stats.map((s, i) => {
-    // What this work center must feed: an explicit sizing target (e.g. subassembly test → FA),
-    // otherwise the slowest work center downstream of it (the flow it can actually deliver into).
     const downstream = stats.slice(i + 1);
     const targetId = sizingTargets.get(s.w.id) ?? null;
     const target = targetId !== null ? stats.find((x) => x.w.id === targetId) : downstream.reduce<(typeof stats)[number] | undefined>((m, x) => (!m || x.throughput < m.throughput ? x : m), undefined);
-    const list = byWc.get(s.w.id) ?? [];
     let wait = 0;
     let delayedActs = 0;
-    for (const a of list) {
+    for (const a of s.d.acts) {
       const r = result.acts.get(a.id);
-      if (r && r.capacityWaitSlots > 0) {
-        wait += r.capacityWaitSlots;
-        delayedActs++;
-      }
+      if (r && r.capacityWaitSlots > 0 && r.driver.type === 'capacity' && r.driver.workCenterId === s.w.id) { wait += r.capacityWaitSlots; delayedActs++; }
     }
     let booked = 0;
     let avail = 0;
@@ -179,24 +188,15 @@ export function bottleneckAnalysis(
       booked += result.ledger.cell(s.w.id, sl)?.load ?? 0;
       avail += result.ledger.capacityAt(s.w.id, sl);
     }
-    const required = target ? round2(target.throughput * s.avgDays) : null;
+    const required = target ? round2((target.throughput / Math.max(1e-9, s.throughput / s.w.capacity))) : null;
     const starves = !!target && s.throughput + 1e-6 < target.throughput;
     return {
-      workCenterId: s.w.id,
-      code: s.w.code,
-      name: s.w.name,
-      capacity: s.w.capacity,
-      avgDurationDays: round2(s.avgDays),
-      throughputPerDay: round2(s.throughput),
-      downstreamCode: target?.w.code ?? null,
-      downstreamThroughput: target ? round2(target.throughput) : null,
-      requiredCapacityToFeedDownstream: required,
-      additionalCapacityNeeded: required !== null ? Math.max(0, round2(required - s.w.capacity)) : 0,
-      isProgramBottleneck: Math.abs(s.throughput - minTp) < 1e-6,
-      starvesDownstream: starves,
-      capacityWaitDays: wait / 2,
-      delayedActivities: delayedActs,
-      utilizationNext20d: avail ? round2(booked / avail) : 0,
+      workCenterId: s.w.id, code: s.w.code, name: s.w.name, capacity: s.w.capacity, avgDurationDays: round2(s.avgDays),
+      opsPerDay: round2(s.opsPerDay), throughputPerDay: round2(s.throughput), scope: s.scope,
+      downstreamCode: target?.w.code ?? null, downstreamThroughput: target ? round2(target.throughput) : null,
+      requiredCapacityToFeedDownstream: required, additionalCapacityNeeded: required !== null ? Math.max(0, round2(required - s.w.capacity)) : 0,
+      isProgramBottleneck: Math.abs(s.throughput - minTp) < 1e-6, starvesDownstream: starves,
+      capacityWaitDays: wait / 2, delayedActivities: delayedActs, utilizationNext20d: avail ? round2(booked / avail) : 0,
     };
   });
 }
