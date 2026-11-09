@@ -167,7 +167,7 @@ The **AI Assistant** page works without any setup in a limited mode that underst
 |---|---|
 | `docker` is "not recognized" / "command not found" | Docker Desktop isn't installed or isn't running. Open it, wait until it is running, then try again. |
 | "cannot connect to the Docker daemon" | Same as above: Docker Desktop is not running yet. |
-| "no configuration file provided" | The command window is not inside the `evplan-main` folder. Redo **Step 3**. |
+| "no configuration file provided" | The command window is not in the folder that contains `docker-compose.yml`. Type `dir` (Windows) or `ls` (Mac) and press Enter. If you only see another folder called `evplan-main` (extracting the ZIP often creates a folder inside a folder), type `cd evplan-main`, press Enter, and run the command again. Otherwise redo **Step 3**. |
 | "port is already allocated" / "address already in use" | Another program is using the same address. Restart the laptop and try again. |
 | The browser says the page can't be reached | The app is still starting. Wait for the `listening on http://localhost:4000` line. |
 | Any other error | Copy the last 20 or so lines of text from the command window and send them to the person who supports you with the app. |
