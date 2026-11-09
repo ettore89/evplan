@@ -553,6 +553,33 @@ describe('Ramp-up tracker import', () => {
   });
 });
 
+describe('Cancelling a project', () => {
+  it('removes it from the plan and dashboards without erasing anything; frozen deliveries need Management; it can be reactivated', async () => {
+    const k01 = (await pool.query(`SELECT id FROM projects WHERE code = 'K01'`)).rows[0].id;
+    const g01 = (await pool.query(`SELECT id FROM projects WHERE code = 'G01'`)).rows[0].id;
+    expect((await request(app).post(`/api/projects/${k01}/cancel`).set(as('commercial')).send({ reason: 'x' })).status).toBe(422);
+    expect((await request(app).post(`/api/projects/${k01}/cancel`).set(as('mfg')).send({ reason: 'Order withdrawn by the customer' })).status).toBe(403);
+    const frozen = await request(app).post(`/api/projects/${g01}/cancel`).set(as('commercial')).send({ reason: 'Order withdrawn by the customer' });
+    expect(frozen.status).toBe(403); // delivery inside the freeze
+    const unitsBefore = Number((await pool.query('SELECT count(*) n FROM units WHERE project_id = $1', [k01])).rows[0].n);
+    const ok = await request(app).post(`/api/projects/${k01}/cancel`).set(as('commercial')).send({ reason: 'Order withdrawn by the customer' });
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+    const pf = await request(app).get('/api/portfolio').set(as('program'));
+    expect(pf.body.projects.some((p: any) => p.id === k01)).toBe(false);
+    expect(Number((await pool.query(`SELECT count(*) n FROM reservations r JOIN activities a ON a.id = r.activity_id WHERE a.project_id = $1`, [k01])).rows[0].n)).toBe(0);
+    expect(Number((await pool.query('SELECT count(*) n FROM units WHERE project_id = $1', [k01])).rows[0].n)).toBe(unitsBefore);
+    const inactive = await request(app).get('/api/projects-inactive').set(as('program'));
+    expect(inactive.body.find((p: any) => p.id === k01).reason).toBe('Order withdrawn by the customer');
+    const back = await request(app).post(`/api/projects/${k01}/reactivate`).set(as('commercial')).send({ reason: 'Customer re-confirmed the order' });
+    expect(back.status, JSON.stringify(back.body)).toBe(200);
+    const pf2 = await request(app).get('/api/portfolio').set(as('program'));
+    const again = pf2.body.projects.find((p: any) => p.id === k01);
+    expect(again.priority).toBe(Math.max(...pf2.body.projects.map((p: any) => p.priority)));
+    const acts = (await pool.query(`SELECT action FROM audit_events WHERE project_id = $1 AND action LIKE 'project.%'`, [k01])).rows.map((r: any) => r.action);
+    expect(acts).toEqual(expect.arrayContaining(['project.cancel', 'project.reactivate']));
+  });
+});
+
 describe('Logistics booking trigger', () => {
   it('raises a booking request ExWorks − 5 days, follows the date and closes only when the booking is recorded', async () => {
     const p = await createProject('L01', '2027-06-25', [['X800', 1], ['POLLUX', 1]]);

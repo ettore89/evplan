@@ -313,7 +313,7 @@ export async function projectDetails(db: Db, id: number) {
     project: {
       id: p.id, code: p.code, name: p.name, customer: p.customer, siteLocation: p.site_location, country: p.country, route: p.route_name, serviceProfile: p.service_profile,
       serviceConfirmation: p.confirmation_status, requiredDate: p.required_commissioning_date, requiredText: p.required_commissioning_text, requiredExwText: p.required_exw_text,
-      priority: p.priority, demandStatus: p.demand_status, planStatus: p.plan_status, planConfidence: p.plan_confidence, earliestCommissioning: finishLabel(p.earliest_commissioning_slot),
+      priority: p.priority, status: p.status, demandStatus: p.demand_status, planStatus: p.plan_status, planConfidence: p.plan_confidence, earliestCommissioning: finishLabel(p.earliest_commissioning_slot),
       notes: p.notes, createdAt: p.created_at, sapOrderRef: p.sap_order_ref, o2cOwner: p.o2c_owner, spoc: p.spoc, wave: p.wave, series: p.series, rationale: p.rationale,
       customerSituation: p.customer_situation, mitigations: p.mitigations, source: p.source,
     },

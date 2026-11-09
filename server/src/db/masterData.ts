@@ -57,6 +57,7 @@ export const PERMISSIONS: [string, string[], string][] = [
   ['activity.execute.LOGISTICS', ['LOGISTICS', 'MANAGEMENT'], 'Update shipments'],
   ['activity.execute.SERVICE', ['SERVICE', 'MANAGEMENT'], 'Update installation and in-field commissioning'],
   ['project.create', ['COMMERCIAL', 'MANAGEMENT'], 'Create customer projects (initial backward plan)'],
+  ['project.cancel', ['COMMERCIAL', 'MANAGEMENT'], 'Cancel or reactivate a customer project (frozen deliveries need freeze.override)'],
   ['project.commercial.edit', ['COMMERCIAL', 'MANAGEMENT'], 'Edit customer required dates and commercial data'],
   ['scenario.create', ['COMMERCIAL', 'MANAGEMENT'], 'Create / simulate scenarios'],
   ['scenario.op.priority', ['COMMERCIAL', 'MANAGEMENT'], 'Propose priority changes'],

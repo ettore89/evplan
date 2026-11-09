@@ -381,3 +381,5 @@ form.ask input { flex: 1; padding: 8px; }
 .alert.ok { background: #e8f6ee; border-color: #b9e2c9; color: #1f5f3a; }
 .alert.warn { background: #fff6e5; border-color: #f3d6ae; color: #6b4a00; }
 .clickable { cursor: pointer; }
+button.danger { background: var(--red); border-color: var(--red); color: #fff; }
+button.secondary.danger { background: #fff; color: var(--red); border-color: #f1c4c4; }

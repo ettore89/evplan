@@ -129,6 +129,14 @@ Next time you import a newer version of the tracker:
 4. Your data is kept. If the new version changes the database layout of the *demo* data, the demo data is reloaded automatically.
 5. Import your newest tracker (section above). Projects and units you imported before are **updated**, not duplicated.
 
+## Removing a project
+
+1. Open the project (click its code on the **Priority** page).
+2. Click **Cancel project…** (top right), type the reason, and confirm.
+3. The project disappears from Priority, Gantt, Daily Control and Outbound, and its capacity goes back to the other projects.
+
+Nothing is erased: its units, history and audit trail are kept. To bring it back, click **Show cancelled projects** at the bottom of the Priority page, open the project and click **Reactivate project…**. Commercial and Management can do this; a project with a delivery inside the 21-day freeze can only be cancelled by Management. A cancelled project is not brought back by the next tracker import (the preview says so).
+
 ## Booking requests for Logistics (ExWorks − 5 days)
 
 Five days before a delivery reaches ExWorks (packaging complete), if its transport is not booked yet, the app creates a **booking request** for Logistics:

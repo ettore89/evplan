@@ -210,3 +210,50 @@ export async function persistFreeze(c: pg.PoolClient) {
     if (s.frozen && !s.frozenSince) await c.query('UPDATE shipments SET frozen_since = CURRENT_DATE WHERE id = $1 AND frozen_since IS NULL', [s.shipmentId]);
   }
 }
+
+/**
+ * Cancel a customer project: it leaves every view and the plan (its capacity is released at the next
+ * recalculation), but nothing is erased — physical units, history, commitments and the audit trail stay,
+ * and the project can be reactivated. A project with a frozen delivery needs the freeze-override authority.
+ */
+export async function cancelProject(c: pg.PoolClient, user: AuthUser, projectId: number, reason: string) {
+  await requirePermission(c, user, 'project.cancel', 'Cancelling a project requires Commercial or Management / Program');
+  if (!reason || reason.trim().length < 5) throw new HttpError(422, 'A reason is required to cancel a project', 'REASON_REQUIRED');
+  const p = (await c.query('SELECT * FROM projects WHERE id = $1 FOR UPDATE', [projectId])).rows[0];
+  if (!p) throw new HttpError(404, 'Project not found');
+  if (p.status !== 'ACTIVE') throw new HttpError(409, `Project is already ${p.status.toLowerCase()}`);
+  const fz = (await freezeInfo(c, [projectId])).get(projectId);
+  if (fz?.frozen) await requirePermission(c, user, 'freeze.override', 'This project has a delivery inside the freeze: only Management / Program can cancel it');
+  const executed = Number((await c.query(`SELECT count(*) n FROM activities WHERE project_id = $1 AND status IN ('COMPLETED','IN_PROGRESS')`, [projectId])).rows[0].n);
+  await c.query(`UPDATE projects SET status = 'CANCELLED', notes = COALESCE(notes || E'\\n', '') || $2 WHERE id = $1`,
+    [projectId, `Cancelled ${new Date().toISOString().slice(0, 10)} by ${user.name}: ${reason.trim()}`]);
+  await c.query(`UPDATE action_items SET status = 'CANCELLED', closed_by = $2, closed_at = now(), details = COALESCE(details, '') || E'\\nProject cancelled' WHERE project_id = $1 AND status = 'OPEN'`, [projectId, user.id]);
+  await audit(c, { userId: user.id, action: 'project.cancel', changeClass: fz?.frozen ? 'OVERRIDE' : 'COMMERCIAL', entityType: 'project', entityId: projectId, projectId,
+    before: { status: 'ACTIVE', priority: p.priority, frozen: !!fz?.frozen }, after: { status: 'CANCELLED', executedActivities: executed }, reason: reason.trim() });
+  const out = await recalculate(c, { userId: user.id, kind: 'PROJECT_CANCEL', summary: `${p.code} cancelled by ${user.name}` });
+  return { projectId, status: 'CANCELLED', version: out.version, frozen: !!fz?.frozen, executedActivities: executed };
+}
+
+/** Bring a cancelled project back into the plan (placed at the bottom of the ranking unless its old rank is free). */
+export async function reactivateProject(c: pg.PoolClient, user: AuthUser, projectId: number, reason: string) {
+  await requirePermission(c, user, 'project.cancel', 'Reactivating a project requires Commercial or Management / Program');
+  if (!reason || reason.trim().length < 5) throw new HttpError(422, 'A reason is required to reactivate a project', 'REASON_REQUIRED');
+  const p = (await c.query('SELECT * FROM projects WHERE id = $1 FOR UPDATE', [projectId])).rows[0];
+  if (!p) throw new HttpError(404, 'Project not found');
+  if (p.status === 'ACTIVE') throw new HttpError(409, 'Project is already active');
+  const prio = (await c.query(`SELECT COALESCE(MAX(priority), 0) + 1 AS p FROM projects WHERE status = 'ACTIVE'`)).rows[0].p;
+  await c.query(`UPDATE projects SET status = 'ACTIVE', priority = $2, notes = COALESCE(notes || E'\\n', '') || $3 WHERE id = $1`,
+    [projectId, prio, `Reactivated ${new Date().toISOString().slice(0, 10)} by ${user.name}: ${reason.trim()}`]);
+  await audit(c, { userId: user.id, action: 'project.reactivate', changeClass: 'COMMERCIAL', entityType: 'project', entityId: projectId, projectId,
+    before: { status: p.status }, after: { status: 'ACTIVE', priority: prio }, reason: reason.trim() });
+  const out = await recalculate(c, { userId: user.id, kind: 'PROJECT_REACTIVATE', summary: `${p.code} reactivated by ${user.name}` });
+  return { projectId, status: 'ACTIVE', priority: prio, version: out.version };
+}
+
+export async function inactiveProjects(db: Db) {
+  return (await db.query(`SELECT p.id, p.code, p.name, p.status, p.source, c.name customer,
+      (SELECT a.ts FROM audit_events a WHERE a.project_id = p.id AND a.action = 'project.cancel' ORDER BY a.ts DESC LIMIT 1) cancelled_at,
+      (SELECT a.reason FROM audit_events a WHERE a.project_id = p.id AND a.action = 'project.cancel' ORDER BY a.ts DESC LIMIT 1) reason,
+      (SELECT u.name FROM audit_events a JOIN users u ON u.id = a.user_id WHERE a.project_id = p.id AND a.action = 'project.cancel' ORDER BY a.ts DESC LIMIT 1) cancelled_by
+    FROM projects p JOIN customers c ON c.id = p.customer_id WHERE p.status <> 'ACTIVE' ORDER BY p.code`)).rows;
+}

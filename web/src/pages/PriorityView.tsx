@@ -18,6 +18,8 @@ export function PriorityView() {
   const [drag, setDrag] = useState<number | null>(null);
   const [filter, setFilter] = useState('');
   const [demand, setDemand] = useState('ALL');
+  const inactive = useLive<any[]>('/projects-inactive');
+  const [showInactive, setShowInactive] = useState(false);
   useEffect(() => { if (!flow) setOrder(null); }, [data?.version]);
   const projects = useMemo(() => {
     if (!data) return [];
@@ -90,6 +92,14 @@ export function PriorityView() {
             ))}
           </tbody>
         </table>
+      )}
+      {(inactive.data?.length ?? 0) > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <button className="secondary small" onClick={() => setShowInactive(!showInactive)}>{showInactive ? 'Hide' : 'Show'} cancelled projects ({inactive.data!.length})</button>
+          {showInactive && <table className="grid tight" style={{ marginTop: 6 }}><tbody>{inactive.data!.map((x: any) => (
+            <tr key={x.id} className="clickable" onClick={() => nav(`/projects/${x.id}`)}><td><b>{x.code}</b> {x.name}</td><td className="small">{x.customer}</td><td className="small">{x.status.toLowerCase()}{x.cancelled_at ? ` · ${new Date(x.cancelled_at).toLocaleDateString()}` : ''}{x.cancelled_by ? ` · ${x.cancelled_by}` : ''}</td><td className="small wrap">{x.reason}</td></tr>
+          ))}</tbody></table>}
+        </div>
       )}
       {flow && order && (
         <Modal wide title="Priority change — impact simulation" onClose={() => setFlow(false)}>

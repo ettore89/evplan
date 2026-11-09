@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
 import { ActivityPanel } from '../components/ActivityPanel';
 import { MilestoneChain } from '../components/MilestoneChain';
@@ -24,6 +24,8 @@ export function ProjectDetails() {
   const [flow, setFlow] = useState<{ name: string; ops: any[] } | null>(null);
   const [scope, setScope] = useState<string>('all');
   const [unit, setUnit] = useState<number | null>(null);
+  const [cancel, setCancel] = useState<string | null>(null);
+  const nav = useNavigate();
   if (error) return <div className="alert err pad">{error}</div>;
   if (!data) return <div className="muted pad">Loading…</div>;
   const p = data.project;
@@ -56,8 +58,15 @@ export function ProjectDetails() {
         {can('project.commercial.edit') && <button className="secondary" onClick={() => { setReq({ requiredDate: p.requiredDate ?? '', reason: '' }); setEditReq(true); }}>Change required date</button>}
         {can('scenario.op.configuration') && p.demandStatus !== 'COMMITTED' && <button className="secondary" onClick={() => setFlow({ name: `Commit demand ${p.code}`, ops: [{ type: 'commit_demand', projectId: p.id }] })}>Commit demand…</button>}
         {can('scenario.op.schedule') && notStarted && <button className="secondary" onClick={() => setFlow({ name: `Backward re-plan ${p.code}`, ops: [{ type: 'replan_backward', projectId: p.id }] })}>Re-plan backward…</button>}
-        {can('plan.accept_forecast') && <button className="secondary" onClick={acceptForecast}>Accept forecast as commitment</button>}
+        {can('plan.accept_forecast') && p.status === 'ACTIVE' && <button className="secondary" onClick={acceptForecast}>Accept forecast as commitment</button>}
+        {can('project.cancel') && p.status === 'ACTIVE' && <button className="secondary danger" onClick={() => setCancel('')}>Cancel project…</button>}
+        {can('project.cancel') && p.status !== 'ACTIVE' && <button onClick={async () => {
+          const reason = prompt('Reactivate this project — reason:');
+          if (!reason) return;
+          try { await api(`/projects/${p.id}/reactivate`, { body: { reason } }); toast('Project reactivated and re-planned (bottom of the ranking)', 'ok'); reload(); } catch (e: any) { toast(e.message, 'err'); }
+        }}>Reactivate project…</button>}
       </div>
+      {p.status !== 'ACTIVE' && <div className="alert warn"><b>This project is {p.status.toLowerCase()}.</b> It is not shown in the dashboards and is not planned; its units, history and audit trail are kept.</div>}
       <div className="cards">
         <div className="card">
           <h4>Commercial</h4>
@@ -192,6 +201,18 @@ export function ProjectDetails() {
           <label className="field">Reason <span className="req">required</span><textarea value={req.reason} onChange={(e) => setReq({ ...req, reason: e.target.value })} /></label>
           <p className="hint">Changing the customer date re-evaluates risk. Re-planning the schedule requires an approved scenario.</p>
           <div className="actions"><button onClick={saveReq} disabled={req.reason.length < 3}>Save</button></div>
+        </Modal>
+      )}
+      {cancel !== null && (
+        <Modal title={`Cancel ${p.code} · ${p.name}`} onClose={() => setCancel(null)}>
+          <p>The project disappears from the Priority view, Gantt, Daily Control and Outbound, and its capacity is released for the other projects.</p>
+          <p className="hint">Nothing is erased: units, history, commitments and the audit trail are kept, and the project can be reactivated. {s?.freeze.frozen ? 'A delivery is inside the freeze, so only Management / Program can cancel it.' : ''}
+            {data.activities.some((a: any) => ['COMPLETED', 'IN_PROGRESS'].includes(a.status)) ? ' Work has already been executed on this project: physical units stay recorded and can be reassigned to another project through a scenario.' : ''}</p>
+          <label className="field">Reason <span className="req">required</span><textarea rows={2} value={cancel} onChange={(e) => setCancel(e.target.value)} placeholder="e.g. order withdrawn by the customer / duplicate entry" /></label>
+          <div className="actions"><button className="secondary" onClick={() => setCancel(null)}>Keep project</button>
+            <button className="danger" disabled={cancel.trim().length < 5} onClick={async () => {
+              try { await api(`/projects/${p.id}/cancel`, { body: { reason: cancel } }); toast(`${p.code} cancelled — plan recalculated`, 'ok'); setCancel(null); nav('/priority'); } catch (e: any) { toast(e.message, 'err'); }
+            }}>Cancel project</button></div>
         </Modal>
       )}
       {flow && (

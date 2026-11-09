@@ -241,6 +241,7 @@ export async function buildReport(db: Db, parsed: ParsedTracker, decisions: Impo
       return { name: l.name, codes: l.codes, quantity: l.quantity, product: pr?.code ?? null, family: pr ? family.get(pr.code) : null, source: pr?.source ?? null };
     });
     const warnings: string[] = [];
+    if (ex && ex.status !== 'ACTIVE') warnings.push(`Cancelled in the application — tracker rows for this project are not applied (reactivate it first if it is back)`);
     if (!p.requiredCommissioning.exact) warnings.push(p.requiredCommissioning.text ? `Required commissioning "${p.requiredCommissioning.text.replace(/\n/g, ' / ')}" is not an exact date — planned indicatively${p.requiredCommissioning.iso ? ` (≈ ${p.requiredCommissioning.iso})` : ''}` : 'No required commissioning date — indicative plan only');
     for (const l of lines) if (!l.product) warnings.push(`Line "${l.name ?? l.codes.join(' ')}" (${l.quantity}) — product not recognised; not imported`);
     if (country.source === 'ASSUMED') warnings.push(`Destination country assumed ${country.country} (${country.evidence}) — confirm`);
@@ -675,6 +676,7 @@ export async function applyBatch(c: pg.PoolClient, user: AuthUser, id: number, o
     if (rp.match.status === 'MATCHED') {
       // Existing imported project: descriptive fields only when accepted; dates and demand are never changed silently.
       const ex = (await c.query('SELECT * FROM projects WHERE id = $1', [rp.match.projectId])).rows[0];
+      if (ex.status !== 'ACTIVE') { stats.skipped.push(`${rp.label}: cancelled in the application — not updated`); continue; }
       if (ex.source_ref !== `OMT:${key}`) {
         await c.query('UPDATE projects SET source_ref = $2 WHERE id = $1', [ex.id, `OMT:${key}`]);
         await audit(c, { userId: user.id, action: 'import.project.rename', changeClass: 'IMPORT', entityType: 'project', entityId: ex.id, projectId: ex.id,

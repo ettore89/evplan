@@ -12,7 +12,7 @@ import { audit, can, capabilitiesOf, currentSlot, HttpError, requirePermission }
 import { v4Router } from './routes/v4.js';
 import { importRouter } from './routes/imports.js';
 import { executionSchema, updateExecution } from './services/execution.js';
-import { createProject, createProjectSchema, freezeInfo } from './services/projects.js';
+import { cancelProject, createProject, createProjectSchema, freezeInfo, inactiveProjects, reactivateProject } from './services/projects.js';
 import {
   activitiesFor, capacityView, dailyControl, diffSinceSnapshot, gantt, milestoneChain, portfolio, projectDetails, snapshotData,
 } from './services/read.js';
@@ -102,6 +102,15 @@ export function createApp() {
       return { ok: true };
     });
     res.json(out);
+  });
+  api.get('/projects-inactive', async (_req, res) => res.json(await inactiveProjects(pool)));
+  api.post('/projects/:id/cancel', async (req, res) => {
+    const body = z.object({ reason: z.string() }).parse(req.body);
+    res.json(await tx(async (c) => { await lockPlan(c); return cancelProject(c, req.user, id(req), body.reason); }));
+  });
+  api.post('/projects/:id/reactivate', async (req, res) => {
+    const body = z.object({ reason: z.string() }).parse(req.body);
+    res.json(await tx(async (c) => { await lockPlan(c); return reactivateProject(c, req.user, id(req), body.reason); }));
   });
   api.post('/projects/:id/accept-forecast', async (req, res) => {
     const body = z.object({ reason: z.string().min(3) }).parse(req.body);

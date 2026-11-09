@@ -912,3 +912,5 @@ CREATE INDEX IF NOT EXISTS action_items_open ON action_items(kind, status);
 INSERT INTO settings (key, value, description) VALUES ('logistics_booking_trigger', '{"days": 5, "dayType": "CALENDAR", "enabled": true}',
   'Raise a transport-booking request to Logistics when a delivery''s ExWorks date is within this many days and transport is not booked (dayType CALENDAR or WORKING)')
   ON CONFLICT (key) DO NOTHING;
+INSERT INTO permissions (action, roles, description) VALUES ('project.cancel', '{COMMERCIAL,MANAGEMENT}', 'Cancel or reactivate a customer project (frozen deliveries need freeze.override)')
+  ON CONFLICT (action) DO NOTHING;
