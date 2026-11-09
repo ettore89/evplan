@@ -8,6 +8,7 @@ import { currentSlot, newVersion } from './common.js';
 import { persistFreeze } from './projects.js';
 import { loadPlanState } from './state.js';
 import { broadcast } from './realtime.js';
+import { syncBookingTriggers } from './logistics.js';
 
 export interface ApprovalSpec {
   /** Activities whose new forecast becomes the approved schedule. */
@@ -248,6 +249,12 @@ export async function recalculate(c: pg.PoolClient, ctx: RecalcContext): Promise
   const dead = existing.rows.filter((m) => !live.has(key(m.project_id, m.type, m.shipment_id, m.visit_id)) && state.projects.some((p) => p.id === m.project_id)).map((m) => m.id);
   if (dead.length) await c.query('DELETE FROM milestones WHERE id = ANY($1) AND NOT EXISTS (SELECT 1 FROM milestone_commitments mc WHERE mc.milestone_id = milestones.id)', [dead]);
   await persistFreeze(c);
+  // Logistics booking requests follow the freshly persisted ExWorks forecasts.
+  const booking = await syncBookingTriggers(c, state);
+  if (booking.length) {
+    afterCommit(c, () => { for (const b of booking) broadcast({ type: 'notification', audience: ['LOGISTICS', 'MANAGEMENT'], kind: 'TRANSPORT_BOOKING', projectId: null,
+      text: `Book transport for ${b.code} (${b.project}) — ExWorks ${b.exwDate}` }); });
+  }
 
   if (!ctx.quiet) {
     const summary = {

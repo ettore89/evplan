@@ -75,7 +75,7 @@ All planning parameters (capacities, calendars, routes, durations, freeze horizo
 ## Tests
 
 ```bash
-npm test        # 49 tests: engine (pure) + API acceptance tests against PostgreSQL
+npm test        # 51 tests: engine (pure) + API acceptance tests against PostgreSQL
 ```
 
 Meeting-derived acceptance tests (`api.test.ts`, section "Meeting-derived acceptance tests (V4)"):
@@ -94,7 +94,8 @@ Meeting-derived acceptance tests (`api.test.ts`, section "Meeting-derived accept
 | M11 | A scenario simulated on older inputs is stale and must be re-simulated before commit |
 | M12 | Information from an older meeting (`asOf`) cannot overwrite newer state |
 | M13 | Tentative demand is planned indicatively and never displaces committed work |
-| Import ×3 | Tracker preview requires decisions for ambiguous names; apply creates projects/units/readiness/progress, remembers aliases; re-import matches, fills new units and refuses an older workbook |
+| Booking trigger | No request 7 days before ExWorks; request at ExWorks − 5 for Logistics; cannot be ticked off; booking without reference refused; booking with reference closes it |
+| Import ×4 | Tracker preview requires decisions for ambiguous names; apply creates projects/units/readiness/progress, remembers aliases; re-import matches, fills new units and refuses an older workbook |
 
 | Spec test | Where |
 |---|---|
@@ -239,9 +240,13 @@ Each milestone keeps its original committed date (baseline), latest approved dat
 
 **New pages.** *Readiness* (all gates and open actions), *Outbound* (weekly review: ExWorks vs dispatch, service profile and its confirmation, booking deadline, documents, held units, unacknowledged configuration changes), *Materials · SW · Quality*, *Import*. The Daily Control gets a **change basket** (collect proposals during the call, simulate them together, commit once), readiness needed in the next 10 days, physical handovers, outbound and open actions. Project pages get Units, Shipments & site, Readiness, Materials, Tests & quality, Configuration and Actions tabs. The Gantt shows systems, shipments and site visits, confidence styling, open-gate markers, per-delivery milestones and product-family / demand filters.
 
+### Logistics booking trigger
+
+Every recalculation checks each active delivery: when its ExWorks date (actual or forecast) is within `settings.logistics_booking_trigger.days` (default **5 calendar days**; `dayType: WORKING` counts facility working days) and transport is not booked, a `TRANSPORT_BOOKING` action is raised for Logistics (owner LOGISTICS, due on the trigger date), audited, and pushed as a notification to Logistics and Management. It follows ExWorks when the date moves, and closes only when the booking is recorded on the shipment with a reference (or when the shipment departs); ticking it off is refused (`BOOKING_REQUIRED`), cancelling is reserved to Management. The Outbound review lists open requests and the upcoming trigger date of every unbooked delivery.
+
 ### Importing the OM Ramp-Up Tracker
 
-*Import* (Management/Program, `import.apply`) reads the workbook on the server: **Priority** sheet → projects with order lines, required dates (only an unambiguous dd.mm.yyyy is exact; weeks, months, "tbc", "CHANGE: …" are indicative), customer situation, SAP order, O2C owner, mitigations, configuration attributes; **Production Plan** → physical units (name, serial, item code → product, maturity → hardware revision, system grouping, batches → deliveries, confirmed ExWorks → imported per-delivery commitments, sub-assembly/component colours → readiness gates, timeline P/EOL spans → actuals, EOL status → unreleased test records); **On Site Plan** → site visits (dates with planned/effective state, roles); **EAP SW Versions** → release candidates with known issues; **Test status** → test coverage; **Tracker** → open topics as action items. The preview lists every interpretation; ambiguous or unmatched names must be confirmed and are remembered as aliases. Tracker progress only moves forward, never overwrites application actuals or gate states changed in the app, and an older workbook is refused unless a reason is given. The workbook and its contents stay in the database; nothing is committed to the repository.
+*Import* (Management/Program, `import.apply`) reads the workbook on the server: **Priority** sheet → projects with order lines, required dates (only an unambiguous dd.mm.yyyy is exact; weeks, months, "tbc", "CHANGE: …" are indicative), customer situation, SAP order, O2C owner, mitigations, configuration attributes; **Production Plan** → physical units (name, serial, item code → product, maturity → hardware revision, system grouping, batches → deliveries, confirmed ExWorks → imported per-delivery commitments, sub-assembly/component colours → readiness gates, timeline P/EOL spans → actuals, EOL status → unreleased test records); **On Site Plan** → site visits (dates with planned/effective state, roles); **EAP SW Versions** → release candidates with known issues; **Test status** → test coverage; **Tracker** → open topics as action items. The preview lists every interpretation; ambiguous or unmatched names must be confirmed and are remembered as aliases. Tracker progress only moves forward, never overwrites application actuals or gate states changed in the app, and an older workbook is refused unless a reason is given. On re-import, projects are matched by a stable name key (account numbers and bracketed notes are ignored); a renamed project is offered as a candidate that a person confirms; renamed units keep their identity (`unit_history` RENAMED); a unit the tracker lists under a different project is reported with a reassignment action instead of being duplicated. The workbook and its contents stay in the database; nothing is committed to the repository.
 
 ---
 

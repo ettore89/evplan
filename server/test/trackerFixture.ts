@@ -6,16 +6,16 @@ const YELLOW = 'FFFFFF00';
 const RED = 'FFFF0000';
 const fill = (argb: string) => ({ type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb } });
 
-export async function trackerWorkbook(opts: { modified?: Date; extraUnit?: boolean } = {}) {
+export async function trackerWorkbook(opts: { modified?: Date; extraUnit?: boolean; renamed?: boolean } = {}) {
   const wb = new ExcelJS.Workbook();
   wb.modified = opts.modified ?? new Date('2026-11-02T10:00:00Z');
 
   const pr = wb.addWorksheet('Priority for 2026 and QTY');
   pr.getRow(2).values = ['', 'Prio', 'EAP', 'Series', 'Customer', 'Rational', 'scope', 'Required Commissioning', 'Required EXW', 'Customer situation', 'SO Number in SAP', 'O2C Responsible',
     'Mitigations', 'Cabinet Name', 'Cabinet code', 'cabinet count', 'Dispenser A Name', 'Dispenser A Code', 'Right code', 'Dispenser A count', 'Dispenser B Name', 'Dispenser B Code', 'Dispenser B count'];
-  pr.getRow(3).values = ['', 1, 'W1', 'X', 'Nordwind Energie Berlin', 'Flagship', '1*X800, 2*SOLO', '20.01.2027', '18.12.2026', 'stable', '100099001', 'A. Example', '', 'EAP CE OM800', 'YAD.B1320', 1,
+  pr.getRow(3).values = ['', 1, 'W1', 'X', opts.renamed ? 'Nordwind Energie Berlin - (500123, Nordwind AG)' : 'Nordwind Energie Berlin', 'Flagship', '1*X800, 2*SOLO', '20.01.2027', '18.12.2026', 'stable', '100099001', 'A. Example', '', 'EAP CE OM800', 'YAD.B1320', 1,
     'OM SOLO', 'YAD.A0H14.0', '', 2];
-  pr.getRow(4).values = ['', 2, 'W2', 'M', 'Fjord Transit Oslo Pilot', 'Pilot', 'M400-2-DOCK-2', 'Q1 2027', 'end of January', 'PO pending', '', '', '', 'EAP M400 CE', 'YAE.A0L05.0', 1,
+  pr.getRow(4).values = ['', 2, 'W2', 'M', opts.renamed ? 'Fjord Transit Oslo' : 'Fjord Transit Oslo Pilot', 'Pilot', 'M400-2-DOCK-2', 'Q1 2027', 'end of January', 'PO pending', '', '', '', 'EAP M400 CE', 'YAE.A0L05.0', 1,
     'Dock', 'YAE.A0Q05.0', '', 2];
   pr.getRow(5).values = ['', 3, 'W2', 'X', 'Nordwind Energie Hamburg', 'Second site', '1*X800, 2*SOLO', 'March 2027', '', 'stable', '100099002', '', '', 'EAP CE OM800', 'YAD.B1320', 1,
     'OM SOLO', 'YAD.A0H14.0', '', 2];

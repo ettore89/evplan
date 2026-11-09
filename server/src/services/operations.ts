@@ -116,6 +116,10 @@ export async function updateAction(c: pg.PoolClient, user: AuthUser, id: number,
   const a = (await c.query('SELECT * FROM action_items WHERE id = $1 FOR UPDATE', [id])).rows[0];
   if (!a) throw new HttpError(404, 'Action not found');
   if (a.kind === 'LOGISTICS_ACK' && !(await can(c, user, 'logistics.acknowledge'))) throw new HttpError(403, 'Logistics / order-to-cash acknowledges configuration changes');
+  if (a.kind === 'TRANSPORT_BOOKING') {
+    if (body.status === 'DONE' || body.status === 'ACKNOWLEDGED') throw new HttpError(422, 'A booking request is closed by recording the booking reference on the shipment', 'BOOKING_REQUIRED', { shipmentId: a.related?.shipmentId });
+    if (user.role !== 'MANAGEMENT') throw new HttpError(403, 'Only Management / Program can cancel a booking request');
+  }
   if (a.owner_role && a.owner_role !== user.role && user.role !== 'MANAGEMENT' && a.kind !== 'LOGISTICS_ACK') throw new HttpError(403, `Owned by ${a.owner_role}`);
   await c.query('UPDATE action_items SET status = $2, closed_by = $3, closed_at = now(), details = COALESCE(details, \'\') || $4 WHERE id = $1', [id, body.status, user.id, body.note ? `\n${body.status}: ${body.note}` : '']);
   await syncDerivedGates(c, a.project_id ? [a.project_id] : undefined);

@@ -531,4 +531,67 @@ describe('Ramp-up tracker import', () => {
     expect(ap2.status).toBe(409);
     expect(ap2.body.code).toBe('STALE_IMPORT');
   });
+
+  it('a project renamed in the tracker is updated, not duplicated: account numbers are ignored, other renames are confirmed', async () => {
+    const r = await request(app).post('/api/imports/om-tracker').set(as('program')).set('Content-Type', 'application/octet-stream')
+      .send(await trackerWorkbook({ modified: new Date('2026-11-04T10:00:00Z'), extraUnit: true, renamed: true }));
+    expect(r.status).toBe(201);
+    const berlin = r.body.report.projects.find((p: any) => p.label.startsWith('Nordwind Energie Berlin'));
+    expect(berlin.match.status).toBe('MATCHED'); // "(500123, Nordwind AG)" added — same project
+    const fjord = r.body.report.projects.find((p: any) => p.label === 'Fjord Transit Oslo');
+    expect(fjord.match.status).toBe('CANDIDATE');
+    expect(r.body.blocking.some((b: any) => b.kind === 'PROJECT_MATCH')).toBe(true);
+    const old = (await pool.query(`SELECT id FROM projects WHERE source_ref = 'OMT:fjord transit oslo pilot'`)).rows[0].id;
+    const dec = await request(app).put(`/api/imports/${r.body.id}/decisions`).set(as('program')).send({ projects: { [fjord.key]: { matchProjectId: old } } });
+    expect(dec.body.blocking).toEqual([]);
+    const before = Number((await pool.query(`SELECT count(*) n FROM projects`)).rows[0].n);
+    const ap = await request(app).post(`/api/imports/${r.body.id}/apply`).set(as('program')).send({});
+    expect(ap.status, JSON.stringify(ap.body).slice(0, 600)).toBe(200);
+    expect(ap.body.stats.projectsCreated).toBe(0);
+    expect(Number((await pool.query(`SELECT count(*) n FROM projects`)).rows[0].n)).toBe(before);
+    expect((await pool.query(`SELECT source_ref FROM projects WHERE id = $1`, [old])).rows[0].source_ref).toBe('OMT:fjord transit oslo');
+  });
+});
+
+describe('Logistics booking trigger', () => {
+  it('raises a booking request ExWorks − 5 days, follows the date and closes only when the booking is recorded', async () => {
+    const p = await createProject('L01', '2027-06-25', [['X800', 1], ['POLLUX', 1]]);
+    let d = await details(p.projectId);
+    const exw = d.summary.milestoneParts.find((m: any) => m.type === 'EXW');
+    const exwDay = Math.floor((exw.forecast - 1) / 2);
+    const iso = (day: number) => new Date(day * 86400000).toISOString().slice(0, 10);
+    const history = async (clockIso: string) => {
+      await setClock(clockIso);
+      const now = (await request(app).get('/api/meta').set(as('program'))).body.now;
+      await pool.query(`UPDATE activities SET status = 'COMPLETED', actual_start = approved_start, actual_finish = approved_finish, pct_complete = 100 WHERE project_id = $1 AND approved_finish <= $2 AND status <> 'COMPLETED'`, [p.projectId, now]);
+      await pool.query(`UPDATE activities SET status = 'IN_PROGRESS', actual_start = approved_start WHERE project_id = $1 AND approved_start < $2 AND approved_finish > $2 AND status NOT IN ('COMPLETED','IN_PROGRESS')`, [p.projectId, now]);
+      expect((await request(app).post('/api/recalculate').set(as('program')).send({})).status).toBe(200);
+    };
+    const open = async () => (await pool.query(`SELECT * FROM action_items WHERE kind = 'TRANSPORT_BOOKING' AND project_id = $1 AND status = 'OPEN'`, [p.projectId])).rows;
+    await history(`${iso(exwDay - 7)}T09:00:00+01:00`);
+    expect(await open()).toHaveLength(0); // 7 days before ExWorks: not yet
+    await history(`${iso(exwDay - 4)}T09:00:00+01:00`);
+    const req = await open();
+    expect(req).toHaveLength(1);
+    expect(req[0].owner_role).toBe('LOGISTICS');
+    const exwNow = (await details(p.projectId)).summary.milestoneParts.find((m: any) => m.type === 'EXW');
+    expect(req[0].related.exwDate).toBe(iso(Math.floor((exwNow.forecast - 1) / 2)));
+    expect(req[0].related.triggerDate).toBe(iso(Math.floor((exwNow.forecast - 1) / 2) - 5));
+    const ob = await request(app).get('/api/outbound?days=30').set(as('logistics'));
+    expect(ob.body.bookingRequests.some((x: any) => x.id === req[0].id)).toBe(true);
+    // ticking it off is not a booking
+    const tick = await request(app).patch(`/api/actions/${req[0].id}`).set(as('logistics')).send({ status: 'DONE' });
+    expect(tick.status).toBe(422);
+    expect(tick.body.code).toBe('BOOKING_REQUIRED');
+    d = await details(p.projectId);
+    const sh = d.shipments[0];
+    expect((await request(app).patch(`/api/shipments/${sh.id}`).set(as('logistics')).send({ transportBooked: true })).status).toBe(422); // reference required
+    const ok = await request(app).patch(`/api/shipments/${sh.id}`).set(as('logistics')).send({ transportBooked: true, bookingRef: 'DSV-778812' });
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+    expect(await open()).toHaveLength(0);
+    const closed = (await pool.query(`SELECT * FROM action_items WHERE id = $1`, [req[0].id])).rows[0];
+    expect(closed.status).toBe('DONE');
+    expect(closed.details).toContain('DSV-778812');
+    await setClock(CLOCK);
+  });
 });

@@ -9,6 +9,8 @@ You don't need to know GitHub or programming. In short:
 3. Type **one** command.
 4. Open the app in your web browser.
 
+> **Already ran an older version?** Go to [Updating to the latest version](#updating-to-the-latest-version) below.
+
 ---
 
 ## Step 1 – Install Docker Desktop (one time only)
@@ -109,9 +111,33 @@ Your workbook stays on your laptop: it is read by the app running on your own co
 
 If your tracker uses internal code names for products, or customer and site names from which the country can be recognised, an administrator can add them once under **Admin → Governance settings → import_rules** (for example `"productNamePatterns": [["mycodename", "X800"]]`). They stay in your database only.
 
-Next time you import a newer version of the tracker, your earlier name decisions are remembered, existing projects are updated, and anything already recorded in the app is never overwritten by the spreadsheet. An older workbook cannot replace a newer one unless you give a reason.
+Next time you import a newer version of the tracker:
+
+* your earlier name decisions are remembered and existing projects are **updated**;
+* a project whose name only gained an account number or a note (e.g. "ACME Retail" → "ACME Retail - (123456 ACME Inc.)") is recognised automatically; a project whose name really changed is shown as **"Renamed?"** so you can pick "Same as …" or "No — a new project";
+* a unit that was renamed (e.g. "Cabinet 4" → "Cabinet 4 R2") keeps its identity and history;
+* a unit that the tracker now lists under a different project is **not moved silently**: an action asks you to move it with a "Reassign / borrow unit" scenario, so both projects' impacts are shown;
+* anything already recorded in the app is never overwritten by the spreadsheet, and an older workbook cannot replace a newer one unless you give a reason.
 
 ---
+
+## Updating to the latest version
+
+1. Stop the running app: click inside its command window and press **Ctrl + C** (or press **Stop** next to "evplan" in Docker Desktop).
+2. Download the new ZIP exactly as in **Step 2**, extract it, and **replace** your old `evplan-main` folder with the new one.
+3. Open a command window in the new folder (**Step 3**) and run `docker compose up --build` (**Step 4**). The first start after an update takes a few minutes again.
+4. Your data is kept. If the new version changes the database layout of the *demo* data, the demo data is reloaded automatically.
+5. Import your newest tracker (section above). Projects and units you imported before are **updated**, not duplicated.
+
+## Booking requests for Logistics (ExWorks − 5 days)
+
+Five days before a delivery reaches ExWorks (packaging complete), if its transport is not booked yet, the app creates a **booking request** for Logistics:
+
+* Logistics users get a pop-up notification, and the request appears on **Outbound** (top section "Booking requests") and in the **Daily Control** open actions.
+* For every delivery that is not booked, the Outbound table shows **"request on <date>"** so you can see it coming.
+* The request is closed by clicking **Book…** and entering the carrier's booking reference. It cannot simply be ticked off.
+* If the ExWorks date moves, the request moves with it.
+* The 5 days can be changed (or counted as working days) under **Admin → Governance settings → `logistics_booking_trigger`**, e.g. `{"days": 5, "dayType": "WORKING", "enabled": true}`.
 
 ## Everyday use
 

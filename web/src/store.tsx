@@ -72,6 +72,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       ws.onmessage = (m) => {
         const msg = JSON.parse(m.data);
         if (msg.type === 'presence') setPresence(msg.users);
+        if (msg.type === 'notification' && (!msg.audience || msg.audience.includes(user.role))) toast(`🔔 ${msg.text}`, 'info');
         if (msg.type === 'plan.updated') {
           setVersion(msg.version);
           setEvents((e) => [{ ...msg, at: Date.now() }, ...e].slice(0, 30));

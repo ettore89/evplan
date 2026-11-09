@@ -89,7 +89,7 @@ export function ImportView() {
             {editable && <button disabled={busy || batch.blocking?.length > 0} onClick={apply} title={batch.blocking?.length ? 'Resolve the decisions listed below first' : ''}>Apply import</button>}
           </div>
           <div className="statgrid">
-            <div className="stat"><b>{rep.summary.projects}</b><span>projects ({rep.summary.newProjects} new, {rep.summary.matchedProjects} matched)</span></div>
+            <div className="stat"><b>{rep.summary.projects}</b><span>projects ({rep.summary.newProjects} new, {rep.summary.matchedProjects} updated{rep.summary.projectsToConfirm ? `, ${rep.summary.projectsToConfirm} to confirm` : ''})</span></div>
             <div className="stat"><b>{rep.summary.units}</b><span>unit rows ({rep.summary.unitsWithIssues} with remarks)</span></div>
             <div className="stat"><b>{rep.summary.groupsNeedingDecision}</b><span>of {rep.summary.groups} name groups need a decision</span></div>
             <div className="stat"><b>{rep.summary.sitePlans}</b><span>site plans</span></div>
@@ -168,14 +168,21 @@ export function ImportView() {
               return (
                 <tr key={p.key} className={pd.include === false ? 'dim' : ''}>
                   <td>{p.priority ?? '—'}</td>
-                  <td><b>{p.label}</b><div className="small muted">{p.match.status === 'MATCHED' ? `matches ${p.match.code}` : `new: ${p.proposed.code}`} · {p.wave} {p.series}</div></td>
+                  <td><b>{p.label}</b>
+                    {p.match.status === 'MATCHED' && <div className="small muted">updates {p.match.code}{p.match.via !== 'key' ? ` (was "${p.match.name}")` : ''} · {p.wave} {p.series}</div>}
+                    {p.match.status === 'NEW' && <div className="small muted">new: {p.proposed.code} · {p.wave} {p.series}</div>}
+                    {p.match.status === 'CANDIDATE' && (editable ? (
+                      <div><span className="small late">Renamed? </span><select value={pd.matchProjectId ?? ''} onChange={(e) => decide({ projects: { [p.key]: { matchProjectId: e.target.value === 'NEW' ? 'NEW' : Number(e.target.value) } } })}>
+                        <option value="">— same as an existing project? —</option>
+                        {p.match.candidates.map((c: any) => <option key={c.projectId} value={c.projectId}>Same as {c.code} "{c.label}"</option>)}
+                        <option value="NEW">No — a new project</option></select></div>) : null)}</td>
                   <td className="small">{p.lines.map((l: any, i: number) => <div key={i} className={l.product ? '' : 'late'}>{l.quantity}× {l.product ?? '?'} <span className="muted">{l.codes.join(' ')}</span></div>)}</td>
                   <td>{p.trackedUnits}</td>
                   <td className="small">{p.proposed.requiredDate ? <b>{p.proposed.requiredDate}</b> : <span className="muted">indicative{p.proposed.indicativeDate ? ` ≈ ${p.proposed.indicativeDate}` : ''}</span>}<div className="muted wrap">{p.proposed.requiredText}</div></td>
-                  <td>{editable && p.match.status === 'NEW' ? <select value={pd.demandStatus ?? p.proposed.demandStatus} onChange={(e) => decide({ projects: { [p.key]: { demandStatus: e.target.value } } })}>
+                  <td>{editable && p.match.status !== 'MATCHED' ? <select value={pd.demandStatus ?? p.proposed.demandStatus} onChange={(e) => decide({ projects: { [p.key]: { demandStatus: e.target.value } } })}>
                     {['TENTATIVE', 'APPROVED', 'COMMITTED'].map((d) => <option key={d} value={d} disabled={d === 'COMMITTED' && !p.proposed.requiredDate}>{DEMAND_LABEL[d]}</option>)}</select> : DEMAND_LABEL[p.proposed.demandStatus]}
                     <div className="small muted wrap">{p.proposed.demandReason}</div></td>
-                  <td>{editable && p.match.status === 'NEW' ? <select value={pd.country ?? p.proposed.country ?? ''} onChange={(e) => decide({ projects: { [p.key]: { country: e.target.value } } })}>
+                  <td>{editable && p.match.status !== 'MATCHED' ? <select value={pd.country ?? p.proposed.country ?? ''} onChange={(e) => decide({ projects: { [p.key]: { country: e.target.value } } })}>
                     <option value="">— choose —</option>{COUNTRIES.map((c) => <option key={c}>{c}</option>)}</select> : p.proposed.country}
                     {p.proposed.countrySource === 'ASSUMED' && !pd.country && <div className="small late">assumed</div>}</td>
                   <td className="small wrap">{p.warnings.map((w: string, i: number) => <div key={i}>• {w}</div>)}{p.diffs.map((d: any, i: number) => <div key={`d${i}`} className="late">Δ {d.field}: {String(d.app ?? '—')} → {String(d.tracker ?? '—')}</div>)}</td>

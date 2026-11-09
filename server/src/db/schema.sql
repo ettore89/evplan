@@ -719,7 +719,7 @@ CREATE TABLE IF NOT EXISTS rework_packages (
 
 CREATE TABLE IF NOT EXISTS action_items (
   id serial PRIMARY KEY,
-  kind text NOT NULL CHECK (kind IN ('BOM_CORRECTION','LOGISTICS_ACK','RETEST_REVIEW','EXPLANATION_REQUIRED','RECONCILIATION','GENERAL')),
+  kind text NOT NULL CHECK (kind IN ('BOM_CORRECTION','LOGISTICS_ACK','TRANSPORT_BOOKING','RETEST_REVIEW','EXPLANATION_REQUIRED','RECONCILIATION','GENERAL')),
   title text NOT NULL,
   details text,
   project_id int REFERENCES projects(id) ON DELETE CASCADE,
@@ -904,3 +904,11 @@ END $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS audit_events_no_update ON audit_events;
 CREATE TRIGGER audit_events_no_update BEFORE UPDATE OR DELETE ON audit_events
   FOR EACH ROW EXECUTE FUNCTION audit_events_immutable();
+
+-- Additive upgrades for existing V4 databases (idempotent).
+ALTER TABLE action_items DROP CONSTRAINT IF EXISTS action_items_kind_check;
+ALTER TABLE action_items ADD CONSTRAINT action_items_kind_check CHECK (kind IN ('BOM_CORRECTION','LOGISTICS_ACK','TRANSPORT_BOOKING','RETEST_REVIEW','EXPLANATION_REQUIRED','RECONCILIATION','GENERAL'));
+CREATE INDEX IF NOT EXISTS action_items_open ON action_items(kind, status);
+INSERT INTO settings (key, value, description) VALUES ('logistics_booking_trigger', '{"days": 5, "dayType": "CALENDAR", "enabled": true}',
+  'Raise a transport-booking request to Logistics when a delivery''s ExWorks date is within this many days and transport is not booked (dayType CALENDAR or WORKING)')
+  ON CONFLICT (key) DO NOTHING;

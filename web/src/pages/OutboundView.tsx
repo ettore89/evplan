@@ -34,6 +34,9 @@ export function OutboundView() {
         <div className="spacer" />
         Horizon <select value={days} onChange={(e) => setDays(Number(e.target.value))}>{[7, 14, 21, 42, 90].map((d) => <option key={d} value={d}>{d} days</option>)}</select>
       </div>
+      <h3>Booking requests <span className="count">{data.bookingRequests.length}</span> <span className="muted small">raised {data.bookingTrigger.days} {data.bookingTrigger.dayType === 'WORKING' ? 'working' : 'calendar'} days before ExWorks when transport is not booked{data.bookingTrigger.enabled ? '' : ' (trigger switched off)'}</span></h3>
+      <ActionList actions={data.bookingRequests} onChanged={reload} />
+      <h3>Deliveries reaching ExWorks in the next {days} days</h3>
       <table className="grid tight">
         <thead><tr><th>Shipment</th><th>ExWorks</th><th>Dispatch</th><th>Service profile</th><th>Manifest</th><th>Booking</th><th>Collection</th><th>Documents</th><th>Status</th><th /></tr></thead>
         <tbody>{data.shipments.map((s: any) => (
@@ -43,7 +46,9 @@ export function OutboundView() {
             <td className="nowrap small">{s.dispatchLabel}</td>
             <td className="small">{s.service ?? '—'}{s.serviceStatus === 'ASSUMPTION' && <div className="tag-red small" title="Case-specific planning input that Logistics must confirm">assumption — confirm</div>}</td>
             <td className="small">{s.manifest} units{s.held > 0 && <div className="tag-red">{s.held} on quality hold</div>}</td>
-            <td className="small">{s.transportBooked ? <>booked {s.bookingRef}</> : s.bookingDeadline ? <span className={s.bookingOverdue ? 'late' : ''}>book by {fmtTs(s.bookingDeadline)}</span> : <span className="muted">no deadline</span>}</td>
+            <td className="small">{s.transportBooked ? <>booked {s.bookingRef}</> : <>
+              {s.bookingRequestId ? <span className="tag-amber">booking requested</span> : s.bookingTriggerDate && <span className="muted">request on {s.bookingTriggerDate}</span>}
+              {s.bookingDeadline && <div className={s.bookingOverdue ? 'late' : ''}>book by {fmtTs(s.bookingDeadline)}</div>}</>}</td>
             <td className="small">{s.collectionAt ? fmtTs(s.collectionAt) : '—'}{s.coordinator && <div className="muted">{s.coordinator}</div>}</td>
             <td className="small">{(s.documents ?? []).map((d: any) => (
               <span key={d.id} className={`pill clickable ${d.status === 'READY' || d.status === 'NOT_REQUIRED' ? '' : 'late'}`} title={`${d.status}${d.ref ? ` · ${d.ref}` : ''}${d.expected_date ? ` · expected ${d.expected_date}` : ''}`}

@@ -137,7 +137,7 @@ const slug = (s: string) => norm(s).replace(/ /g, '-').toUpperCase();
 export interface ImportDecisions {
   groups?: Record<string, { kind: 'PROJECT'; projectKey: string } | { kind: 'INTERNAL' } | { kind: 'SKIP' }>;
   visits?: Record<string, { kind: 'PROJECT'; projectKey: string } | { kind: 'SKIP' }>;
-  projects?: Record<string, { include?: boolean; country?: string; demandStatus?: 'TENTATIVE' | 'APPROVED' | 'COMMITTED'; acceptUpdates?: boolean }>;
+  projects?: Record<string, { include?: boolean; country?: string; demandStatus?: 'TENTATIVE' | 'APPROVED' | 'COMMITTED'; acceptUpdates?: boolean; matchProjectId?: number | 'NEW' }>;
   /** Per-row overrides of the group decision (e.g. split one customer's units across two orders). */
   units?: Record<string, { kind: 'PROJECT'; projectKey: string } | { kind: 'INTERNAL' } | { kind: 'SKIP' }>;
   replaceDemo?: boolean;
@@ -145,10 +145,13 @@ export interface ImportDecisions {
   trustPastDates?: boolean;
 }
 
+/** Stable part of a customer / project name: account numbers, bracketed notes and trailing dashes are ignored. */
+export const baseName = (s: string) => norm(s.replace(/\(.*?\)/g, ' ').replace(/\b\d{5,}\b\)?/g, ' ').replace(/[-–]\s*$/, ' '));
+
 function projectKeys(parsed: ParsedTracker) {
   const seen = new Map<string, number>();
   return parsed.projects.map((p) => {
-    const base = norm(p.customer);
+    const base = baseName(p.customer) || norm(p.customer);
     const n = (seen.get(base) ?? 0) + 1;
     seen.set(base, n);
     return n === 1 ? base : `${base} #${n}`;
@@ -158,7 +161,7 @@ function projectKeys(parsed: ParsedTracker) {
 const projectLabel = (p: TrackerProject, key: string) => (key.includes(' #') ? `${p.customer} (${p.scope ?? 'row ' + p.row})` : p.customer);
 
 /** Build the preview report: what would be created, matched, updated or skipped, and what needs a decision. */
-export async function buildReport(db: Db, parsed: ParsedTracker) {
+export async function buildReport(db: Db, parsed: ParsedTracker, decisions: ImportDecisions = {}) {
   await loadImportRules(db);
   const products = (await db.query('SELECT id, code, name, family, item_codes FROM product_types')).rows as ProductRow[];
   const family = new Map(products.map((p) => [p.code, p.family]));
@@ -166,14 +169,31 @@ export async function buildReport(db: Db, parsed: ParsedTracker) {
   const existing = (await db.query(`SELECT id, code, name, source_ref, demand_status, required_commissioning_date, required_commissioning_text, required_exw_text, customer_situation,
       mitigations, rationale, sap_order_ref, o2c_owner, spoc, wave, series, priority, status FROM projects WHERE source_ref LIKE 'OMT:%'`)).rows;
   const byRef = new Map(existing.map((e) => [e.source_ref, e]));
+  // Match tracker projects to projects imported earlier: same key, else same stable name (account numbers or notes
+  // added in the tracker), else a person confirms one of the similar names (a renamed project is never guessed).
+  const matchOf = new Map<string, { status: 'MATCHED' | 'CANDIDATE' | 'NEW'; ex?: any; via?: string; candidates?: { projectId: number; code: string; label: string; score: number }[] }>();
+  const used = new Set<number>();
+  keys.forEach((k) => { const ex = byRef.get(`OMT:${k}`); if (ex) { matchOf.set(k, { status: 'MATCHED', ex, via: 'key' }); used.add(ex.id); } });
+  parsed.projects.forEach((p, i) => {
+    const k = keys[i];
+    if (matchOf.has(k)) return;
+    const dec = decisions.projects?.[k]?.matchProjectId;
+    if (dec === 'NEW') { matchOf.set(k, { status: 'NEW' }); return; }
+    if (typeof dec === 'number') { const ex = existing.find((e) => e.id === dec && !used.has(e.id)); if (ex) { matchOf.set(k, { status: 'MATCHED', ex, via: 'decision' }); used.add(ex.id); return; } }
+    const free = existing.filter((e) => !used.has(e.id) && e.status === 'ACTIVE');
+    const same = free.filter((e) => baseName(e.name) === k.split(' #')[0] || baseName(e.source_ref.slice(4)) === k.split(' #')[0]);
+    if (same.length === 1 && !k.includes(' #')) { matchOf.set(k, { status: 'MATCHED', ex: same[0], via: 'name' }); used.add(same[0].id); return; }
+    const m = matchName(p.customer, free.map((e) => ({ key: String(e.id), label: e.name })));
+    const cands = m.candidates.filter((c) => c.score >= 1).map((c) => ({ projectId: Number(c.key), code: free.find((e) => e.id === Number(c.key))!.code, label: c.label, score: c.score }));
+    matchOf.set(k, cands.length ? { status: 'CANDIDATE', candidates: cands } : { status: 'NEW' });
+  });
+  const idToKey = new Map([...matchOf.entries()].filter(([, v]) => v.ex).map(([k, v]) => [v.ex.id, k]));
   const aliases = (await db.query(`SELECT alias, target_id FROM name_aliases WHERE kind = 'PROJECT'`)).rows;
-  const projById = new Map(existing.map((e) => [e.id, e]));
   const aliasOf = (text: string) => {
     const a = aliases.find((x) => x.alias === groupKey(text) || x.alias === norm(text));
     if (!a) return null;
     if (a.target_id === 0) return 'INTERNAL';
-    const p = projById.get(a.target_id);
-    return p ? p.source_ref.slice(4) : null;
+    return idToKey.get(a.target_id) ?? null;
   };
   const plist = parsed.projects.map((p, i) => ({ key: keys[i], label: projectLabel(p, keys[i]) }));
 
@@ -210,7 +230,8 @@ export async function buildReport(db: Db, parsed: ParsedTracker) {
   // Projects
   const projects = parsed.projects.map((p, i) => {
     const key = keys[i];
-    const ex = byRef.get(`OMT:${key}`);
+    const mt = matchOf.get(key)!;
+    const ex = mt.ex;
     const groupTexts = groupList.filter((g) => g.suggestion?.kind === 'PROJECT' && g.suggestion.projectKey === key).flatMap((g) => g.texts);
     const visitTexts = visitGroups.filter((v) => v.suggestion?.kind === 'PROJECT' && v.suggestion.projectKey === key).map((v) => v.project);
     const country = inferCountry([p.customer, p.scope ?? '', p.customerSituation ?? '', p.requiredExw.text ?? '', ...groupTexts, ...visitTexts], p.series, p.lines.map((l) => l.name ?? ''));
@@ -239,7 +260,8 @@ export async function buildReport(db: Db, parsed: ParsedTracker) {
     }
     return {
       key, row: p.row, customer: p.customer, label: projectLabel(p, key), priority: p.priority, wave: p.wave, series: p.series, scope: p.scope,
-      match: ex ? { status: 'MATCHED' as const, projectId: ex.id, code: ex.code } : { status: 'NEW' as const },
+      match: ex ? { status: 'MATCHED' as const, projectId: ex.id, code: ex.code, name: ex.name, via: mt.via }
+        : mt.status === 'CANDIDATE' ? { status: 'CANDIDATE' as const, candidates: mt.candidates } : { status: 'NEW' as const },
       proposed: {
         code: ex?.code ?? `OM-${slug(p.customer).slice(0, 22)}${key.includes(' #') ? '-' + key.split(' #')[1] : ''}`,
         country: country.country, countrySource: country.source, countryEvidence: country.evidence,
@@ -260,7 +282,7 @@ export async function buildReport(db: Db, parsed: ParsedTracker) {
     olderThanApplied: prevApplied ? new Date(parsed.asOf) < new Date(prevApplied) : false,
     demoProjects: demo, warnings: parsed.warnings,
     summary: {
-      projects: projects.length, newProjects: projects.filter((p) => p.match.status === 'NEW').length, matchedProjects: projects.filter((p) => p.match.status === 'MATCHED').length,
+      projects: projects.length, newProjects: projects.filter((p) => p.match.status === 'NEW').length, matchedProjects: projects.filter((p) => p.match.status === 'MATCHED').length, projectsToConfirm: projects.filter((p) => p.match.status === 'CANDIDATE').length,
       units: parsed.units.length, unitsWithIssues: unitInfo.filter((u) => u.issues.length).length, skippedRows: parsed.skippedRows.length,
       groups: groupList.length, groupsNeedingDecision: groupList.filter((g) => g.status !== 'AUTO').length,
       sitePlans: visitGroups.length, releases: parsed.releases.length, testCoverage: parsed.coverage.length, openTopics: openTopics.length,
@@ -286,8 +308,19 @@ export function blockingIssues(report: ImportReport, d: ImportDecisions) {
     if (d.visits?.[v.key] || v.status === 'AUTO') continue;
     out.push({ kind: 'VISIT', key: v.key, message: `Site plan "${v.project}${v.batch ? ' ' + v.batch : ''}": ${v.reason}` });
   }
+  const claimed = new Map<number, string>();
   for (const p of report.projects) {
-    if (!included.has(p.key) || p.match.status === 'MATCHED') continue;
+    const id = p.match.status === 'MATCHED' ? p.match.projectId : typeof d.projects?.[p.key]?.matchProjectId === 'number' ? d.projects[p.key].matchProjectId as number : null;
+    if (id === null || id === undefined || !included.has(p.key)) continue;
+    if (claimed.has(id)) out.push({ kind: 'PROJECT_MATCH', key: p.key, message: `${p.label} and ${claimed.get(id)} are both matched to the same existing project` });
+    else claimed.set(id, p.label);
+  }
+  for (const p of report.projects) {
+    if (included.has(p.key) && p.match.status === 'CANDIDATE' && d.projects?.[p.key]?.matchProjectId === undefined) {
+      out.push({ kind: 'PROJECT_MATCH', key: p.key, message: `${p.label}: is this the existing project ${(p.match.candidates ?? []).map((c: any) => `${c.code} "${c.label}"`).join(' or ')}, or a new one?` });
+      continue;
+    }
+    if (!included.has(p.key) || p.match.status === 'MATCHED' || typeof d.projects?.[p.key]?.matchProjectId === 'number') continue;
     const country = d.projects?.[p.key]?.country ?? p.proposed.country;
     if (!country) out.push({ kind: 'COUNTRY', key: p.key, message: `${p.label}: destination country unknown` });
     const ds = d.projects?.[p.key]?.demandStatus ?? p.proposed.demandStatus;
@@ -554,6 +587,25 @@ async function applyVisitProgress(c: pg.PoolClient, user: AuthUser, projectId: n
   return pastPlanned;
 }
 
+/**
+ * A tracker row for project A naming a unit the application holds elsewhere (another project, or an internal / spare
+ * unit) is a physical move. It is not applied silently: it is reported and an action asks for a reassignment scenario.
+ */
+async function reportMovedUnit(c: pg.PoolClient, user: AuthUser, u: TrackerUnit, projectId: number, label: string, serialOk: boolean | '' | null, batchId: number, stats: any) {
+  const other = (await c.query(`SELECT un.id, un.internal_id, un.name, un.status, p.code project FROM units un LEFT JOIN projects p ON p.id = un.project_id
+    WHERE (un.project_id IS DISTINCT FROM $1) AND un.status <> 'OBSOLETE' AND un.created_at < (SELECT created_at FROM import_batches WHERE id = $4)
+      AND ((($2::text) IS NOT NULL AND un.serial = $2) OR (un.source = 'IMPORT' AND lower(un.name) = lower($3))) LIMIT 1`,
+  [projectId, serialOk ? u.serial : null, u.name, batchId])).rows[0];
+  if (!other) return false;
+  const where = other.project ? `project ${other.project}` : 'the internal / spare units';
+  stats.conflicts.push(`${u.name}: the tracker lists it under ${label}, the application has it in ${where} — not moved; reassign it through a scenario if it really moved`);
+  await c.query(`INSERT INTO action_items (kind, title, details, project_id, owner_role, source, created_by, related) VALUES ('RECONCILIATION',$1,$2,$3,'MANAGEMENT','IMPORT',$4,$5)`,
+    [`Unit ${u.name} moved in the tracker`, `The tracker (row ${u.row}) lists ${u.name} under ${label}; the application holds ${other.internal_id} in ${where}. Use "Reassign / borrow unit" in a scenario so donor and recipient impacts are simulated and traceability is kept.`,
+      projectId, user.id, JSON.stringify({ batch: batchId, unitId: other.id, row: u.row })]);
+  stats.actions++;
+  return true;
+}
+
 export async function applyBatch(c: pg.PoolClient, user: AuthUser, id: number, opts: { allowOlder?: boolean; reason?: string } = {}) {
   await requirePermission(c, user, 'import.apply', 'Applying an import requires the import.apply authority');
   const b = (await c.query('SELECT * FROM import_batches WHERE id = $1 FOR UPDATE', [id])).rows[0];
@@ -562,7 +614,7 @@ export async function applyBatch(c: pg.PoolClient, user: AuthUser, id: number, o
   const parsed = b.parsed as ParsedTracker;
   const d = (b.mapping ?? {}) as ImportDecisions;
   // Re-evaluate against the current database: other imports or edits may have happened since the preview.
-  const report = await buildReport(c, parsed);
+  const report = await buildReport(c, parsed, d);
   const blocking = blockingIssues(report, d);
   if (blocking.length) throw new HttpError(422, `${blocking.length} decision(s) still needed before applying`, 'DECISIONS_REQUIRED', { blocking });
   if (report.olderThanApplied && !(opts.allowOlder && opts.reason)) {
@@ -623,6 +675,11 @@ export async function applyBatch(c: pg.PoolClient, user: AuthUser, id: number, o
     if (rp.match.status === 'MATCHED') {
       // Existing imported project: descriptive fields only when accepted; dates and demand are never changed silently.
       const ex = (await c.query('SELECT * FROM projects WHERE id = $1', [rp.match.projectId])).rows[0];
+      if (ex.source_ref !== `OMT:${key}`) {
+        await c.query('UPDATE projects SET source_ref = $2 WHERE id = $1', [ex.id, `OMT:${key}`]);
+        await audit(c, { userId: user.id, action: 'import.project.rename', changeClass: 'IMPORT', entityType: 'project', entityId: ex.id, projectId: ex.id,
+          before: { trackerName: ex.source_ref.slice(4) }, after: { trackerName: p.customer }, reason: rp.match.via === 'decision' ? 'Confirmed as the same project in the import preview' : 'Same project name without account numbers / notes' });
+      }
       const accept = pd.acceptUpdates !== false;
       const safe = rp.diffs.filter((x) => !['required_commissioning_date', 'demand_status'].includes(x.field));
       if (accept && safe.length) {
@@ -635,27 +692,48 @@ export async function applyBatch(c: pg.PoolClient, user: AuthUser, id: number, o
           [`Tracker differs: ${x.field.replace(/_/g, ' ')}`, `Application: ${x.app ?? '—'} · Tracker: ${x.tracker ?? '—'}. Change it through a scenario if the tracker is right.`, ex.id, user.id, JSON.stringify({ batch: id, field: x.field })]);
         stats.actions++;
       }
+      // Units are matched by serial, then by name, then by a renamed name of the same product ("Cab-4" → "Cab-4 R2").
+      // A unit that the application holds in another project is never duplicated: the move is reported for a reassignment.
       // New tracked units fill planned (untracked) units of the same product, else are added.
       const known = (await c.query(`SELECT id, name, serial, product_type_id, source, hw_revision FROM units WHERE project_id = $1`, [ex.id])).rows;
+      const currentNames = new Set(tracked.map((t) => norm(t.u.name)));
+      const currentSerials = new Set(tracked.map((t) => t.u.serial).filter(Boolean));
+      const taken = new Set<number>();
       for (const t of tracked) {
-        const hit = known.find((k) => (t.u.serial && k.serial === t.u.serial) || (k.name && norm(k.name) === norm(t.u.name)));
+        const serialOk = t.u.serial && (serialCount.get(t.u.serial) ?? 0) === 1;
+        let hit = known.find((k) => !taken.has(k.id) && ((serialOk && k.serial === t.u.serial) || (k.name && norm(k.name) === norm(t.u.name))));
+        if (!hit) {
+          const tn = new Set(norm(t.u.name).split(' '));
+          const renamed = known.filter((k) => !taken.has(k.id) && k.source === 'IMPORT' && k.name && k.product_type_id === pid.get(t.product)!.id
+            && !currentNames.has(norm(k.name)) && !(k.serial && currentSerials.has(k.serial)) && (!k.serial || !t.u.serial || k.serial === t.u.serial)
+            && (() => { const kn = norm(k.name).split(' '); return kn.length >= 2 && kn.every((w: string) => tn.has(w)); })());
+          if (renamed.length === 1) {
+            hit = renamed[0];
+            await c.query('UPDATE units SET name = $2 WHERE id = $1', [hit.id, t.u.name]);
+            await c.query(`INSERT INTO unit_history (unit_id, event, from_value, to_value, reason, user_id) VALUES ($1,'RENAMED',$2,$3,'Name changed in the ramp-up tracker',$4)`,
+              [hit.id, JSON.stringify({ name: hit.name }), JSON.stringify({ name: t.u.name, row: t.u.row, batch: id }), user.id]);
+            (stats.renamed ??= []).push(`${hit.name} → ${t.u.name}`);
+          }
+        }
         if (hit) {
+          taken.add(hit.id);
           await c.query(`UPDATE units SET serial = COALESCE(serial, $2), item_code = COALESCE(item_code, $3), hw_revision = COALESCE($4, hw_revision) WHERE id = $1`,
-            [hit.id, (serialCount.get(t.u.serial ?? '') ?? 0) > 1 ? null : t.u.serial, t.u.itemCode, t.u.maturity]);
+            [hit.id, serialOk ? t.u.serial : null, t.u.itemCode, t.u.maturity]);
           if (t.u.maturity && hit.hw_revision && hit.hw_revision !== t.u.maturity) stats.conflicts.push(`${t.u.name}: hardware revision ${hit.hw_revision} in the application kept (tracker ${t.u.maturity})`);
           await applyUnitProgress(c, user, hit.id, t.u, asOfDay, stats);
           continue;
         }
-        const ph = known.find((k) => k.source === 'PLAN' && k.product_type_id === pid.get(t.product)!.id && !k.serial && !(k as any).taken);
+        if (await reportMovedUnit(c, user, t.u, ex.id, rp.label, serialOk, id, stats)) continue;
+        const ph = known.find((k) => !taken.has(k.id) && k.source === 'PLAN' && k.product_type_id === pid.get(t.product)!.id && !k.serial);
         let unitId: number;
         if (ph) {
-          (ph as any).taken = true;
+          taken.add(ph.id);
           await c.query(`UPDATE units SET name = $2, serial = $3, item_code = $4, hw_revision = COALESCE($5, hw_revision), source = 'IMPORT', notes = $6 WHERE id = $1`,
-            [ph.id, t.u.name, (serialCount.get(t.u.serial ?? '') ?? 0) > 1 ? null : t.u.serial, t.u.itemCode, t.u.maturity, t.u.mapping || null]);
+            [ph.id, t.u.name, serialOk ? t.u.serial : null, t.u.itemCode, t.u.maturity, t.u.mapping || null]);
           unitId = ph.id; stats.unitsFilled++;
         } else {
           const sh = (await c.query('SELECT id FROM shipments WHERE project_id = $1 ORDER BY seq DESC LIMIT 1', [ex.id])).rows[0]?.id ?? null;
-          unitId = (await createUnit(c, { projectId: ex.id, productTypeId: pid.get(t.product)!.id, shipmentId: sh, name: t.u.name, serial: (serialCount.get(t.u.serial ?? '') ?? 0) > 1 ? null : t.u.serial,
+          unitId = (await createUnit(c, { projectId: ex.id, productTypeId: pid.get(t.product)!.id, shipmentId: sh, name: t.u.name, serial: serialOk ? t.u.serial : null,
             itemCode: t.u.itemCode, hwRevision: t.u.maturity, seq: 900 + t.u.row, source: 'IMPORT', userId: user.id })).id;
           stats.reconciliation.push(`${rp.label}: ${t.u.name} is new in the tracker and was added without a system — assign it in the project`);
           await syncProjectGraph(c, ex.id, 'Unit added from tracker');
@@ -691,8 +769,10 @@ export async function applyBatch(c: pg.PoolClient, user: AuthUser, id: number, o
     const visitPlans = visitsFor(key);
     const demand = pd.demandStatus ?? rp.proposed.demandStatus;
     const site = visitPlans[0]?.project ?? p.customer;
+    let code = rp.proposed.code;
+    for (let n = 2; (await c.query('SELECT 1 FROM projects WHERE code = $1', [code])).rows.length; n++) code = `${rp.proposed.code.slice(0, 36)}-${n}`;
     const out = await createProject(c, user, {
-      code: rp.proposed.code, name: projectLabel(p, key), customerId, siteLocation: site, country, routeId: route.id, serviceProfileId: profile,
+      code, name: projectLabel(p, key), customerId, siteLocation: site, country, routeId: route.id, serviceProfileId: profile,
       requiredDate: rp.proposed.requiredDate, demandStatus: demand,
       notes: [p.scope ? `Scope (tracker): ${p.scope}` : null, p.foundationByAbb ? `Foundation by ABB: ${p.foundationByAbb}` : null,
         p.basePlates ? `Base plates: ${p.basePlates}` : null, p.jigs ? `Installation jigs: ${p.jigs}` : null,
@@ -713,6 +793,7 @@ export async function applyBatch(c: pg.PoolClient, user: AuthUser, id: number, o
     const unitRows = (await c.query('SELECT id, system_id, product_type_id FROM units WHERE project_id = $1 ORDER BY seq', [projectId])).rows;
     const taken = new Set<number>();
     const assign = async (t: { u: TrackerUnit; product: string }, systemId: number | null) => {
+      if (await reportMovedUnit(c, user, t.u, projectId, rp.label, t.u.serial && (serialCount.get(t.u.serial) ?? 0) === 1, id, stats)) return;
       const row = unitRows.find((r) => !taken.has(r.id) && r.system_id === systemId && r.product_type_id === pid.get(t.product)!.id);
       if (!row) { stats.skipped.push(`${t.u.name}: no matching unit slot`); return; }
       taken.add(row.id);

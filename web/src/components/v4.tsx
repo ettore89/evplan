@@ -100,6 +100,12 @@ export function GateTable({ gates, showProject = true, onChanged }: { gates: any
 export function ActionList({ actions, onChanged }: { actions: any[]; onChanged?: () => void }) {
   const { toast } = useApp();
   if (!actions.length) return <div className="muted">No open actions.</div>;
+  const { can } = useApp();
+  const book = async (a: any) => {
+    const ref = prompt(`${a.title}\n\nBooking reference (carrier booking number):`);
+    if (!ref) return;
+    try { await api(`/shipments/${a.related.shipmentId}`, { method: 'PATCH', body: { transportBooked: true, bookingRef: ref } }); toast('Transport booked — request closed', 'ok'); onChanged?.(); } catch (e: any) { toast(e.message, 'err'); }
+  };
   const set = async (a: any, status: string) => {
     const note = status === 'DONE' || status === 'CANCELLED' ? prompt('Note (optional)') ?? undefined : undefined;
     try { await api(`/actions/${a.id}`, { method: 'PATCH', body: { status, note } }); onChanged?.(); } catch (e: any) { toast(e.message, 'err'); }
@@ -110,11 +116,13 @@ export function ActionList({ actions, onChanged }: { actions: any[]; onChanged?:
         <tr key={a.id} className={a.status !== 'OPEN' ? 'dim' : ''}>
           <td className="small nowrap"><span className="pill">{a.kind.replace(/_/g, ' ').toLowerCase()}</span></td>
           <td>{a.project && <b>{a.project} </b>}{a.title}<div className="small muted wrap">{a.details}</div></td>
-          <td className="small">{a.owner_name ?? a.owner_role ?? ''}{a.due_date && <div className="muted">due {String(a.due_date).slice(0, 10)}</div>}</td>
+          <td className="small">{a.owner_name ?? a.owner_role ?? ''}{a.due_date && <div className={a.status === 'OPEN' && String(a.due_date).slice(0, 10) < new Date().toISOString().slice(0, 10) ? 'late' : 'muted'}>due {String(a.due_date).slice(0, 10)}</div>}</td>
           <td className="small muted">{fmtTs(a.created_at)}{a.source === 'IMPORT' ? ' · tracker' : ''}</td>
           <td className="nowrap">{a.status === 'OPEN' ? <>
             {a.kind === 'LOGISTICS_ACK' && <button className="small secondary" onClick={() => set(a, 'ACKNOWLEDGED')}>Acknowledge</button>}
-            <button className="small secondary" onClick={() => set(a, 'DONE')}>Done</button></> : <span className="small muted">{a.status.toLowerCase()}</span>}</td>
+            {a.kind === 'TRANSPORT_BOOKING' ? <>{can('logistics.manage') && <button className="small" onClick={() => book(a)}>Book…</button>}
+              {can('freeze.override') && <button className="small secondary" onClick={() => set(a, 'CANCELLED')}>Cancel</button>}</>
+              : <button className="small secondary" onClick={() => set(a, 'DONE')}>Done</button>}</> : <span className="small muted">{a.status.toLowerCase()}</span>}</td>
         </tr>
       ))}</tbody>
     </table>

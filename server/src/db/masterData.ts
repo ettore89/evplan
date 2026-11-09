@@ -42,6 +42,8 @@ export const SETTINGS: [string, unknown, string][] = [
   ['validation_assumptions', { sharedWithPrecommissioning: false, status: 'TO_CONFIRM', note: 'Validation skids and the pre-commissioning bench are modelled as separate resources sharing the R&D engineer pool. Confirm whether they are the same skids/personnel.' }, 'Open assumption on shared validation / pre-commissioning capacity'],
   ['precommissioning_allocation', { configurationReadiness: 'GATE_BEFORE_VALIDATION', finalPrecommissioningSlots: 1, status: 'TO_CONFIRM', note: 'Site configuration & numbering is a readiness gate before validation (no duration); the existing 0.5-day allowance is the final pre-commissioning after validation. Confirm the split.' }, 'How the 0.5-day pre-commissioning allowance is allocated'],
   ['offline_mode', { supported: false, note: 'Updates outside meetings are assumed to be made while connected. Disconnected editing and synchronisation are not implemented.' }, 'Offline usage assumption'],
+  ['logistics_booking_trigger', { days: 5, dayType: 'CALENDAR', enabled: true },
+    'Raise a transport-booking request to Logistics when a delivery\'s ExWorks date is within this many days and transport is not booked (dayType CALENDAR or WORKING)'],
   ['import_rules', { countryKeywords: [], internalHint: '', productNamePatterns: [], noiseWords: [] },
     'Ramp-up tracker import: organisation-specific vocabulary added to the generic rules. countryKeywords: [regex, ISO country]; internalHint: regex for internal / R&D rows; productNamePatterns: [regex, product code] for code names used in the tracker; noiseWords: words ignored when matching names'],
   ['clock_override', null, 'ISO timestamp that replaces the system clock (demos/tests only); null = real time'],

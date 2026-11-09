@@ -7,6 +7,7 @@ import { currentSlot, currentVersion, getSetting, HttpError } from './common.js'
 import { freezeInfo } from './projects.js';
 import { presence } from './realtime.js';
 import { conditionalActive, loadPlanState } from './state.js';
+import { bookingTriggerInfo } from './logistics.js';
 
 export const MILESTONE_LABEL: Record<MilestoneType, string> = { EOL: 'EOL Testing Completed', EXW: 'ExWorks Ready', COMM: 'Commissioned' };
 const UNIT_WORD: Record<MilestoneType, string> = { EOL: 'units tested', EXW: 'units packed', COMM: 'systems commissioned' };
@@ -475,8 +476,15 @@ export async function outboundReview(db: Db, horizonDays = 21) {
   const horizon = now + horizonDays * 2;
   const upcoming = shipments.filter((s) => s.transit_status !== 'COMPLETED' && s.transit_status !== 'IN_PROGRESS' && (s.exw_forecast ?? Infinity) <= horizon);
   const acks = (await db.query(`SELECT a.*, p.code project FROM action_items a LEFT JOIN projects p ON p.id = a.project_id WHERE a.kind = 'LOGISTICS_ACK' AND a.status = 'OPEN' ORDER BY a.created_at`)).rows;
+  const requests = (await db.query(`SELECT a.*, p.code project FROM action_items a LEFT JOIN projects p ON p.id = a.project_id WHERE a.kind = 'TRANSPORT_BOOKING' AND a.status = 'OPEN' ORDER BY a.due_date, a.id`)).rows;
+  const trig = await bookingTriggerInfo(db, await loadPlanState(db));
+  const todayIso = dayToIso(dayOf(now));
   return {
-    now, horizonDays,
+    now, horizonDays, bookingTrigger: trig.policy,
+    bookingRequests: requests.map((r) => {
+      const due = r.due_date ? (r.due_date instanceof Date ? dayToIso(Math.round(r.due_date.getTime() / 86400000)) : String(r.due_date).slice(0, 10)) : null;
+      return { ...r, due, overdue: !!due && due < todayIso };
+    }),
     shipments: upcoming.map((s) => {
       const docs = (s.documents ?? []) as any[];
       const missing = docs.filter((d) => d.status !== 'READY' && d.status !== 'NOT_REQUIRED');
@@ -488,6 +496,8 @@ export async function outboundReview(db: Db, horizonDays = 21) {
         bookingOverdue: !s.transport_booked && bookingDue !== null && new Date(bookingDue).getTime() < Date.now(),
         collectionAt: s.collection_at, receivingWindow: s.receiving_window_start ? `${s.receiving_window_start} → ${s.receiving_window_end ?? ''}` : null,
         coordinator: s.coordinator, documents: docs, missingDocuments: missing.map((d) => d.doc_type),
+        bookingTriggerDate: s.transport_booked ? null : trig.triggerFor(s.exw_actual ?? s.exw_forecast),
+        bookingRequestId: requests.find((r) => String(r.related?.shipmentId) === String(s.id))?.id ?? null,
         dispatchBlocked: (s.exw_actual !== null && missing.length > 0) || s.held > 0,
       };
     }),
