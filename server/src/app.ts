@@ -18,6 +18,7 @@ import {
 } from './services/read.js';
 import { recalculate } from './services/recalc.js';
 import { syncDerivedGates } from './services/gates.js';
+import { demoDataSummary, removeDemoData } from './services/demo.js';
 import { presence } from './services/realtime.js';
 import {
   commitScenario, createScenario, evaluate, opSchema, rejectScenario, resimulate, scenarioSchema, staleProjects, submitScenario, updateScenarioOps,
@@ -102,6 +103,15 @@ export function createApp() {
       return { ok: true };
     });
     res.json(out);
+  });
+  api.get('/demo-data', async (_req, res) => res.json(await demoDataSummary(pool)));
+  api.post('/demo-data/remove', async (req, res) => {
+    res.json(await tx(async (c) => {
+      await lockPlan(c);
+      const removed = await removeDemoData(c, req.user);
+      const out = await recalculate(c, { userId: req.user.id, kind: 'DEMO_REMOVED', summary: `Demo data removed by ${req.user.name}` });
+      return { removed, version: out.version };
+    }));
   });
   api.get('/projects-inactive', async (_req, res) => res.json(await inactiveProjects(pool)));
   api.post('/projects/:id/cancel', async (req, res) => {

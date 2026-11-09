@@ -56,6 +56,8 @@ export function Admin() {
   const def = ENT[ent];
   const pk = def.pk ?? 'id';
   const load = () => api(`/admin/${ent}`).then(setRows).catch((e) => toast(e.message, 'err'));
+  const [demo, setDemo] = useState<{ projects: number } | null>(null);
+  useEffect(() => { api('/demo-data').then(setDemo).catch(() => {}); }, []);
   useEffect(() => { load(); setEdit(null); }, [ent]);
   const save = async () => {
     if (!edit) return;
@@ -86,6 +88,16 @@ export function Admin() {
     <div className="page split">
       <div className="list-pane">
         <h2>Administration</h2>
+        {(demo?.projects ?? 0) > 0 && can('admin.config') && (
+          <div className="card" style={{ marginBottom: 8 }}>
+            <b>Demo data</b>
+            <div className="small muted">{demo!.projects} made-up demo projects (P01…P09) and their side data: demo software approvals, stock, BOM lines, reservations, issues, customers.</div>
+            <button className="small danger" style={{ marginTop: 6 }} onClick={async () => {
+              if (!confirm('Remove all demo projects and demo data? Your imported or manually created projects, the users and the settings are kept. This cannot be undone.')) return;
+              try { const r = await api('/demo-data/remove', { body: {} }); toast(`Demo data removed (${r.removed.projects} projects)`, 'ok'); setDemo({ projects: 0 }); reloadMeta(); } catch (e: any) { toast(e.message, 'err'); }
+            }}>Remove demo data</button>
+          </div>
+        )}
         {Object.entries(ENT).map(([k, v]) => <div key={k} className={`list-item ${ent === k ? 'on' : ''}`} onClick={() => setEnt(k)}>{v.label}</div>)}
       </div>
       <div className="detail-pane">

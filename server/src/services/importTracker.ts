@@ -14,6 +14,7 @@ import { syncDerivedGates } from './gates.js';
 import { createUnit, syncProjectGraph } from './graph.js';
 import { createProject, planIndicative, planInitial } from './projects.js';
 import { recalculate } from './recalc.js';
+import { removeDemoData } from './demo.js';
 import { parseTrackerWorkbook, type ParsedTracker, type TrackerProject, type TrackerUnit, type TrackerVisit } from './trackerParse.js';
 
 // ---------------------------------------------------------------- name normalisation & matching
@@ -626,10 +627,10 @@ export async function applyBatch(c: pg.PoolClient, user: AuthUser, id: number, o
     testRecords: 0, visitsUpdated: 0, releases: 0, coverage: 0, actions: 0, conflicts: [] as string[], skipped: [] as string[], reconciliation: [] as string[], demoRemoved: 0 };
 
   if (d.replaceDemo) {
-    const r = await c.query(`DELETE FROM projects WHERE source = 'DEMO' RETURNING id`);
-    stats.demoRemoved = r.rowCount;
-    await c.query(`DELETE FROM units WHERE project_id IS NULL AND source = 'DEMO'`);
-    await c.query(`DELETE FROM scenarios WHERE status IN ('DRAFT','SUBMITTED')`);
+    // All demo data goes, including side data (software approvals, stock, BOM lines, reservations…) that would distort the real plan.
+    const removed = await removeDemoData(c, user, { viaImport: id });
+    stats.demoRemoved = removed.projects;
+    stats.demoRecordsRemoved = removed;
   }
 
   await loadImportRules(c);

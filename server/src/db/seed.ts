@@ -29,6 +29,7 @@ import { snapshotData } from '../services/read.js';
 import { createScenario } from '../services/scenarios.js';
 import { approveRelease, markArtifactAvailable, upsertRelease } from '../services/software.js';
 import { createUnit } from '../services/graph.js';
+import { recordDemoData } from '../services/demo.js';
 import { migrate } from './migrate.js';
 import { insertMasterData, truncateAll } from './masterData.js';
 import { lockPlan, pool, tx } from './pool.js';
@@ -250,6 +251,7 @@ export async function seed({ today = dayToIso(Math.floor(nowSlot() / 2)), quiet 
   });
 
   await pool.query(`UPDATE units SET source = 'DEMO' WHERE project_id IS NULL AND source <> 'IMPORT'`);
+  await recordDemoData(pool);
   await setClock(null);
   log('Seed complete.');
   return { pid };

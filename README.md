@@ -75,7 +75,7 @@ All planning parameters (capacities, calendars, routes, durations, freeze horizo
 ## Tests
 
 ```bash
-npm test        # 52 tests: engine (pure) + API acceptance tests against PostgreSQL
+npm test        # 53 tests: engine (pure) + API acceptance tests against PostgreSQL
 ```
 
 Meeting-derived acceptance tests (`api.test.ts`, section "Meeting-derived acceptance tests (V4)"):

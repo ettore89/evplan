@@ -622,3 +622,27 @@ describe('Logistics booking trigger', () => {
     await setClock(CLOCK);
   });
 });
+
+describe('Removing the demo data (runs last: it reseeds the database)', () => {
+  it('removes demo projects and all demo side data, also for databases seeded by an earlier version', async () => {
+    const { seed } = await import('../src/db/seed.js');
+    for (const legacy of [false, true]) {
+      await seed({ quiet: true });
+      if (legacy) await pool.query(`DELETE FROM settings WHERE key = 'demo_records'`);
+      const login = async (u: string) => (await request(app).post('/api/auth/login').send({ username: u, password: 'demo' })).body.token;
+      const prog = await login('program');
+      expect((await request(app).get('/api/demo-data').set({ Authorization: `Bearer ${prog}` })).body.projects).toBe(9);
+      expect((await request(app).post('/api/demo-data/remove').set({ Authorization: `Bearer ${await login('commercial')}` }).send({})).status).toBe(403);
+      const r = await request(app).post('/api/demo-data/remove').set({ Authorization: `Bearer ${prog}` }).send({});
+      expect(r.status, JSON.stringify(r.body)).toBe(200);
+      const left = (await pool.query(`SELECT (SELECT count(*) FROM projects)::int projects, (SELECT count(*) FROM units)::int units,
+        (SELECT count(*) FROM sw_release_approvals)::int approvals, (SELECT count(*) FROM resource_reservations)::int reservations,
+        (SELECT count(*) FROM material_stock)::int stock, (SELECT count(*) FROM material_receipts)::int receipts, (SELECT count(*) FROM bom_items)::int bom,
+        (SELECT count(*) FROM issues)::int issues, (SELECT count(*) FROM customers)::int customers, (SELECT count(*) FROM plan_snapshots)::int snapshots,
+        (SELECT count(*) FROM users)::int users`)).rows[0];
+      expect(left).toEqual({ projects: 0, units: 0, approvals: 0, reservations: 0, stock: 0, receipts: 0, bom: 0, issues: 0, customers: 0, snapshots: 0, users: 10 });
+      const pf = await request(app).get('/api/portfolio').set({ Authorization: `Bearer ${prog}` });
+      expect(pf.body.projects).toEqual([]);
+    }
+  });
+});

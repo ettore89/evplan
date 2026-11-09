@@ -129,6 +129,15 @@ Next time you import a newer version of the tracker:
 4. Your data is kept. If the new version changes the database layout of the *demo* data, the demo data is reloaded automatically.
 5. Import your newest tracker (section above). Projects and units you imported before are **updated**, not duplicated.
 
+## Removing the demo data
+
+The demo projects P01–P09 are made up. To remove them, either:
+
+* tick **"Remove the demo projects"** when you import your tracker (Import page), or
+* go to **Admin** (logged in as `program`) and click **Remove demo data** in the "Demo data" box at the top left.
+
+This removes the demo projects **and everything the demo created around them** (demo software approvals, stock and purchase orders, BOM lines, resource bookings, issues, customers), so none of it affects your real plan. Your imported projects, the users and the settings are kept. It cannot be undone; to get the demo back, use "Wipe everything and start again" under *Everyday use*.
+
 ## Removing a project
 
 1. Open the project (click its code on the **Priority** page).
